@@ -9,6 +9,8 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
 from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBRegressor
+from packaging import version
+import sklearn
 
 TOP_N_FEATURES = 40
 
@@ -21,7 +23,11 @@ def fetch_nfl_data(seasons):
 @st.cache_data(show_spinner=False)
 def feature_engineering(df):
     all_teams = pd.concat([df['home_team'], df['away_team']]).unique()
-    encoder = OneHotEncoder(sparse=False, handle_unknown='ignore')
+    # Use correct OneHotEncoder argument for your scikit-learn version
+    if version.parse(sklearn.__version__) >= version.parse("1.2"):
+        encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+    else:
+        encoder = OneHotEncoder(sparse=False, handle_unknown='ignore')
     encoder.fit(all_teams.reshape(-1, 1))
     home_team_enc = encoder.transform(df['home_team'].values.reshape(-1, 1))
     away_team_enc = encoder.transform(df['away_team'].values.reshape(-1, 1))
