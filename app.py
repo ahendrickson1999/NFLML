@@ -191,6 +191,8 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
         if col not in X_pred.columns:
             X_pred[col] = 0
     X_pred = X_pred[all_possible_columns]
+    X_pred = X_pred.fillna(0)
+    X_pred = X_pred.replace([np.inf, -np.inf], 0)
     return X_pred
 
 st.title("NFL Score Predictor (Ensemble+Feature Selection)")
