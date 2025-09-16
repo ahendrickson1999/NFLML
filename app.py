@@ -11,6 +11,7 @@ from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBRegressor
 from packaging import version
 import sklearn
+from sklearn.metrics import mean_squared_error
 
 TOP_N_FEATURES = 40
 
@@ -116,9 +117,21 @@ def train_models(X, y):
         model.fit(X, y)
     return models
 
-def ensemble_predict(models, X):
+def get_residual_std(models, X, y):
     preds = np.column_stack([model.predict(X) for model in models])
-    return preds.mean(axis=1)
+    ensemble_pred = preds.mean(axis=1)
+    residuals = y - ensemble_pred
+    return residuals.std()
+
+def ensemble_predict(models, X, noise_std=0):
+    preds = np.column_stack([model.predict(X) for model in models])
+    mean_pred = preds.mean(axis=1)
+    if noise_std > 0:
+        noise = np.random.normal(0, noise_std, size=mean_pred.shape)
+        mean_pred += noise
+    # Clamp negatives to 0 for realism
+    mean_pred = np.clip(mean_pred, 0, None)
+    return mean_pred
 
 def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_columns, team_avgs, team_def_avgs, team_win_avgs):
     last_row = df.iloc[-1]
@@ -195,7 +208,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
     X_pred = X_pred.replace([np.inf, -np.inf], 0)
     return X_pred
 
-st.title("NFL Score Predictor (Ensemble+Feature Selection)")
+st.title("NFL Score Predictor (Ensemble+Feature Selection+Noise)")
 
 seasons = [2021, 2022, 2023, 2024]
 
@@ -221,6 +234,10 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     home_models = train_models(X_home_selected, y_home)
     away_models = train_models(X_away_selected, y_away)
 
+    # Calculate stddev of ensemble residuals for noise
+    resid_std_home = get_residual_std(home_models, X_home_selected, y_home)
+    resid_std_away = get_residual_std(away_models, X_away_selected, y_away)
+
 today = datetime.today().date()
 
 schedule_df = nfl.import_schedules([today.year])
@@ -241,8 +258,8 @@ else:
         )
         X_home_pred = X_pred_full[selected_features_home]
         X_away_pred = X_pred_full[selected_features_away]
-        home_pred = ensemble_predict(home_models, X_home_pred)
-        away_pred = ensemble_predict(away_models, X_away_pred)
+        home_pred = ensemble_predict(home_models, X_home_pred, noise_std=resid_std_home)
+        away_pred = ensemble_predict(away_models, X_away_pred, noise_std=resid_std_away)
         pred_rows.append({
             "Away Team": away_team,
             "Home Team": home_team,
@@ -250,7 +267,7 @@ else:
             "Predicted Home Score": round(float(home_pred[0]), 1)
         })
     st.dataframe(pd.DataFrame(pred_rows))
-    st.caption("Scores are model predictions based on recent data.")
+    st.caption("Scores are model predictions based on recent data with added game-to-game noise.")
 
 st.markdown("---")
 st.subheader("Manual Matchup Prediction")
@@ -265,10 +282,10 @@ if home_team and away_team and home_team != away_team:
     )
     X_home_pred = X_pred_full[selected_features_home]
     X_away_pred = X_pred_full[selected_features_away]
-    home_pred = ensemble_predict(home_models, X_home_pred)
-    away_pred = ensemble_predict(away_models, X_away_pred)
+    home_pred = ensemble_predict(home_models, X_home_pred, noise_std=resid_std_home)
+    away_pred = ensemble_predict(away_models, X_away_pred, noise_std=resid_std_away)
     st.success(f"Prediction: {away_team} @ {home_team}: {round(float(away_pred[0]),1)} - {round(float(home_pred[0]),1)}")
 elif home_team == away_team:
     st.warning("Select different teams!")
 
-st.caption("Powered by nfl_data_py and scikit-learn.")
+st.caption("Powered by nfl_data_py and scikit-learn. Predictions include random game-to-game noise for realism.")
