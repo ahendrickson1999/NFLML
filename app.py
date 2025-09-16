@@ -3,15 +3,14 @@ import pandas as pd
 import numpy as np
 import nfl_data_py as nfl
 from datetime import datetime
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, HistGradientBoostingRegressor, AdaBoostRegressor
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingRegressor, HistGradientBoostingRegressor, AdaBoostRegressor
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, LogisticRegression
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.svm import SVR
 from sklearn.preprocessing import OneHotEncoder
-from xgboost import XGBRegressor
+from xgboost import XGBRegressor, XGBClassifier
 from packaging import version
 import sklearn
-from sklearn.metrics import mean_squared_error
 
 TOP_N_FEATURES = 40
 
@@ -99,40 +98,6 @@ def select_features(X, y, top_n):
     selected_features = importances.nlargest(top_n).index.tolist()
     return selected_features
 
-def train_models(X, y):
-    models = [
-        RandomForestRegressor(n_estimators=100, random_state=42),
-        XGBRegressor(n_estimators=100, random_state=42),
-        LinearRegression(),
-        GradientBoostingRegressor(n_estimators=100, random_state=42),
-        HistGradientBoostingRegressor(random_state=42),
-        AdaBoostRegressor(n_estimators=100, random_state=42),
-        Ridge(),
-        Lasso(),
-        ElasticNet(),
-        KNeighborsRegressor(),
-        SVR()
-    ]
-    for model in models:
-        model.fit(X, y)
-    return models
-
-def get_residual_std(models, X, y):
-    preds = np.column_stack([model.predict(X) for model in models])
-    ensemble_pred = preds.mean(axis=1)
-    residuals = y - ensemble_pred
-    return residuals.std()
-
-def ensemble_predict(models, X, noise_std=0):
-    preds = np.column_stack([model.predict(X) for model in models])
-    mean_pred = preds.mean(axis=1)
-    if noise_std > 0:
-        noise = np.random.normal(0, noise_std, size=mean_pred.shape)
-        mean_pred += noise
-    # Clamp negatives to 0 for realism
-    mean_pred = np.clip(mean_pred, 0, None)
-    return mean_pred
-
 def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_columns, team_avgs, team_def_avgs, team_win_avgs):
     last_row = df.iloc[-1]
     input_dict = {}
@@ -208,7 +173,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
     X_pred = X_pred.replace([np.inf, -np.inf], 0)
     return X_pred
 
-st.title("NFL Score Predictor (Ensemble+Feature Selection+Noise)")
+st.title("NFL Game Winner & Score Predictor (Classification + Regression)")
 
 seasons = [2021, 2022, 2023, 2024]
 
@@ -226,17 +191,107 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         team_def_avgs[team] = opp_scores.mean()
         team_win_avgs[team] = len(wins) / len(scores) if len(scores) > 0 else 0.5
 
-    selected_features_home = select_features(X, y_home, TOP_N_FEATURES)
-    selected_features_away = select_features(X, y_away, TOP_N_FEATURES)
-    X_home_selected = X[selected_features_home]
-    X_away_selected = X[selected_features_away]
+    # Two-stage targets
+    y_winner = (df['home_score'] > df['away_score']).astype(int)
+    y_margin = df['home_score'] - df['away_score']
+    y_total = df['home_score'] + df['away_score']
 
-    home_models = train_models(X_home_selected, y_home)
-    away_models = train_models(X_away_selected, y_away)
+    # Feature selection for regression
+    selected_features_margin = select_features(X, y_margin, TOP_N_FEATURES)
+    selected_features_total = select_features(X, y_total, TOP_N_FEATURES)
 
-    # Calculate stddev of ensemble residuals for noise
-    resid_std_home = get_residual_std(home_models, X_home_selected, y_home)
-    resid_std_away = get_residual_std(away_models, X_away_selected, y_away)
+    X_margin_selected = X[selected_features_margin]
+    X_total_selected = X[selected_features_total]
+
+    # Winner classifier (using all features for best separation)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X, y_winner)
+
+    # Margin regressor
+    margin_models = [
+        RandomForestRegressor(n_estimators=100, random_state=42),
+        XGBRegressor(n_estimators=100, random_state=42),
+        GradientBoostingRegressor(n_estimators=100, random_state=42),
+        HistGradientBoostingRegressor(random_state=42),
+        AdaBoostRegressor(n_estimators=100, random_state=42),
+        LinearRegression(),
+        Ridge(),
+        Lasso(),
+        ElasticNet(),
+        KNeighborsRegressor(),
+        SVR()
+    ]
+    for model in margin_models:
+        model.fit(X_margin_selected, y_margin)
+
+    # Total regressor
+    total_models = [
+        RandomForestRegressor(n_estimators=100, random_state=42),
+        XGBRegressor(n_estimators=100, random_state=42),
+        GradientBoostingRegressor(n_estimators=100, random_state=42),
+        HistGradientBoostingRegressor(random_state=42),
+        AdaBoostRegressor(n_estimators=100, random_state=42),
+        LinearRegression(),
+        Ridge(),
+        Lasso(),
+        ElasticNet(),
+        KNeighborsRegressor(),
+        SVR()
+    ]
+    for model in total_models:
+        model.fit(X_total_selected, y_total)
+
+    # Estimate residual std for margin and total for noise
+    def get_residual_std(models, X, y):
+        preds = np.column_stack([model.predict(X) for model in models])
+        ensemble_pred = preds.mean(axis=1)
+        residuals = y - ensemble_pred
+        return residuals.std()
+    resid_std_margin = get_residual_std(margin_models, X_margin_selected, y_margin)
+    resid_std_total = get_residual_std(total_models, X_total_selected, y_total)
+
+def ensemble_predict(models, X, noise_std=0):
+    preds = np.column_stack([model.predict(X) for model in models])
+    mean_pred = preds.mean(axis=1)
+    if noise_std > 0:
+        noise = np.random.normal(0, noise_std, size=mean_pred.shape)
+        mean_pred += noise
+    return mean_pred
+
+def predict_game(X_pred_full):
+    # Winner classification
+    proba = clf.predict_proba(X_pred_full)[0]
+    pred_winner = clf.predict(X_pred_full)[0]  # 1 = home, 0 = away
+
+    # Margin regression
+    X_margin_pred = X_pred_full[selected_features_margin]
+    pred_margin = ensemble_predict(margin_models, X_margin_pred, noise_std=resid_std_margin)[0]
+
+    # Total regression
+    X_total_pred = X_pred_full[selected_features_total]
+    pred_total = ensemble_predict(total_models, X_total_pred, noise_std=resid_std_total)[0]
+
+    # If classifier says home wins, margin is positive; else, flip sign
+    if pred_winner == 0:
+        pred_margin = -abs(pred_margin)
+    else:
+        pred_margin = abs(pred_margin)
+
+    # Calculate scores
+    home_score = (pred_total + pred_margin) / 2
+    away_score = (pred_total - pred_margin) / 2
+
+    # Clamp negatives, round to 1 decimal
+    home_score = max(0, round(home_score, 1))
+    away_score = max(0, round(away_score, 1))
+
+    return {
+        "winner": "Home" if pred_winner == 1 else "Away",
+        "predicted_home_score": home_score,
+        "predicted_away_score": away_score,
+        "home_win_proba": proba[1],
+        "away_win_proba": proba[0]
+    }
 
 today = datetime.today().date()
 
@@ -256,18 +311,18 @@ else:
             home_team, away_team, encoder, df,
             all_possible_columns, team_avgs, team_def_avgs, team_win_avgs
         )
-        X_home_pred = X_pred_full[selected_features_home]
-        X_away_pred = X_pred_full[selected_features_away]
-        home_pred = ensemble_predict(home_models, X_home_pred, noise_std=resid_std_home)
-        away_pred = ensemble_predict(away_models, X_away_pred, noise_std=resid_std_away)
+        result = predict_game(X_pred_full)
         pred_rows.append({
             "Away Team": away_team,
             "Home Team": home_team,
-            "Predicted Away Score": round(float(away_pred[0]), 1),
-            "Predicted Home Score": round(float(home_pred[0]), 1)
+            "Predicted Away Score": result["predicted_away_score"],
+            "Predicted Home Score": result["predicted_home_score"],
+            "Predicted Winner": result["winner"],
+            "Home Win Prob": f"{100*result['home_win_proba']:.1f}%",
+            "Away Win Prob": f"{100*result['away_win_proba']:.1f}%"
         })
     st.dataframe(pd.DataFrame(pred_rows))
-    st.caption("Scores are model predictions based on recent data with added game-to-game noise.")
+    st.caption("Scores are model predictions based on classification (winner) + regression (margin/total) with ensemble and noise.")
 
 st.markdown("---")
 st.subheader("Manual Matchup Prediction")
@@ -280,12 +335,14 @@ if home_team and away_team and home_team != away_team:
         home_team, away_team, encoder, df,
         all_possible_columns, team_avgs, team_def_avgs, team_win_avgs
     )
-    X_home_pred = X_pred_full[selected_features_home]
-    X_away_pred = X_pred_full[selected_features_away]
-    home_pred = ensemble_predict(home_models, X_home_pred, noise_std=resid_std_home)
-    away_pred = ensemble_predict(away_models, X_away_pred, noise_std=resid_std_away)
-    st.success(f"Prediction: {away_team} @ {home_team}: {round(float(away_pred[0]),1)} - {round(float(home_pred[0]),1)}")
+    result = predict_game(X_pred_full)
+    st.success(
+        f"Prediction: {away_team} @ {home_team}: {result['predicted_away_score']} - {result['predicted_home_score']}  \n"
+        f"Winner: {result['winner']} team  \n"
+        f"Home Win Probability: {100*result['home_win_proba']:.1f}%  \n"
+        f"Away Win Probability: {100*result['away_win_proba']:.1f}%"
+    )
 elif home_team == away_team:
     st.warning("Select different teams!")
 
-st.caption("Powered by nfl_data_py and scikit-learn. Predictions include random game-to-game noise for realism.")
+st.caption("Powered by nfl_data_py and scikit-learn. Two-stage prediction: winner (classification) + margin/total (regression).")
