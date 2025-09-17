@@ -31,7 +31,7 @@ def feature_engineering(df):
     home_team_enc = encoder.transform(df['home_team'].values.reshape(-1, 1))
     away_team_enc = encoder.transform(df['away_team'].values.reshape(-1, 1))
 
-    df['home_advantage'] = 1
+    df['home_advantage'] = 3
     df['div_game'] = df['div_game'].astype(int)
     game_type_enc = pd.get_dummies(df['game_type'], prefix='type')
     roof_enc = pd.get_dummies(df['roof'], prefix='roof')
@@ -145,7 +145,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
                 input_dict[col] = 1
 
     # Numeric and engineered features
-    input_dict['home_advantage'] = 1
+    input_dict['home_advantage'] = 3
     input_dict['div_game'] = 0
     input_dict['temp'] = last_row.get('temp', 60)
     input_dict['wind'] = last_row.get('wind', 5)
@@ -174,7 +174,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
 
 st.title("NFL Game Winner & Score Predictor (Stacked Ensemble + More Seasons)")
 
-seasons = list(range(2010, datetime.today().year + 1))
+seasons = list(range(2020, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
     df = fetch_nfl_data(seasons)
@@ -205,7 +205,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     base_clf_models = [
         RandomForestClassifier(n_estimators=120, random_state=42),
         XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss"),
-        LogisticRegression(max_iter=5000, random_state=42)
+        LogisticRegression(max_iter=2500, random_state=42)
     ]
     base_margin_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
@@ -240,7 +240,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         return model_list
 
     X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=5000, random_state=42)
+    meta_clf = LogisticRegression(max_iter=2500, random_state=42)
     meta_clf.fit(X_cls_stack, y_winner)
     fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
 
