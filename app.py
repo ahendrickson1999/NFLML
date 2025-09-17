@@ -352,10 +352,8 @@ import pandas as pd
 import numpy as np
 import nfl_data_py as nfl
 from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingRegressor, HistGradientBoostingRegressor, AdaBoostRegressor
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet, LogisticRegression
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import Ridge, ElasticNet, LogisticRegression
 from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.model_selection import KFold
@@ -363,7 +361,7 @@ from packaging import version
 import sklearn
 
 TOP_N_FEATURES = 40
-STACK_FOLDS = 5  # For stacking
+STACK_FOLDS = 3  # Reduced for speed
 
 @st.cache_data(show_spinner=False)
 def fetch_nfl_data(seasons):
@@ -374,7 +372,6 @@ def fetch_nfl_data(seasons):
 @st.cache_data(show_spinner=False)
 def feature_engineering(df):
     all_teams = pd.concat([df['home_team'], df['away_team']]).unique()
-    # Use correct OneHotEncoder argument for your scikit-learn version
     if version.parse(sklearn.__version__) >= version.parse("1.2"):
         encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
     else:
@@ -526,7 +523,6 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
 
 st.title("NFL Game Winner & Score Predictor (Stacked Ensemble + More Seasons)")
 
-# --- More Seasons! ---
 seasons = list(range(2010, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
@@ -543,12 +539,10 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         team_def_avgs[team] = opp_scores.mean()
         team_win_avgs[team] = len(wins) / len(scores) if len(scores) > 0 else 0.5
 
-    # Targets
     y_winner = (df['home_score'] > df['away_score']).astype(int)
     y_margin = df['home_score'] - df['away_score']
     y_total = df['home_score'] + df['away_score']
 
-    # Feature selection
     selected_features_margin = select_features(X, y_margin, TOP_N_FEATURES)
     selected_features_total = select_features(X, y_total, TOP_N_FEATURES)
     selected_features_cls = select_features(X, y_winner, TOP_N_FEATURES)
@@ -557,12 +551,10 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     X_total_selected = X[selected_features_total]
     X_cls_selected = X[selected_features_cls]
 
-    # --- STACKING ENSEMBLE CONSTRUCTION --- #
-    # Base models
     base_clf_models = [
         RandomForestClassifier(n_estimators=120, random_state=42),
         XGBClassifier(n_estimators=100, random_state=42, use_label_encoder=False, eval_metric="logloss"),
-        LogisticRegression(max_iter=10000, random_state=42)
+        LogisticRegression(max_iter=1000, random_state=42)
     ]
     base_margin_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
@@ -579,7 +571,6 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         ElasticNet()
     ]
 
-    # Out-of-fold stacking
     def get_stacking_preds(X, y, model_list, problem_type="reg"):
         n_folds = STACK_FOLDS
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
@@ -598,31 +589,26 @@ with st.spinner("Loading and training... (first run may take a minute)"):
                     oof_preds[valid_idx, i] = model.predict(X_valid)
         return oof_preds
 
-    # For final prediction, fit on all data:
     def fit_base_models(X, y, model_list, problem_type="reg"):
         for model in model_list:
             model.fit(X, y)
         return model_list
 
-    # Classification stacking
     X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=10000, random_state=42)
+    meta_clf = LogisticRegression(max_iter=1000, random_state=42)
     meta_clf.fit(X_cls_stack, y_winner)
     fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
 
-    # Margin stacking
     X_margin_stack = get_stacking_preds(X_margin_selected, y_margin, base_margin_models, problem_type="reg")
     meta_margin = Ridge()
     meta_margin.fit(X_margin_stack, y_margin)
     fit_base_models(X_margin_selected, y_margin, base_margin_models, "reg")
 
-    # Total stacking
     X_total_stack = get_stacking_preds(X_total_selected, y_total, base_total_models, problem_type="reg")
     meta_total = Ridge()
     meta_total.fit(X_total_stack, y_total)
     fit_base_models(X_total_selected, y_total, base_total_models, "reg")
 
-    # Estimate residual std for margin and total for noise
     def get_residual_std_stack(meta, X_stack, y):
         pred = meta.predict(X_stack)
         return (y - pred).std()
@@ -673,9 +659,9 @@ def predict_game(X_pred_full):
     home_score = (pred_total + pred_margin) / 2
     away_score = (pred_total - pred_margin) / 2
 
-    # Clamp negatives, round to 1 decimal
-    home_score = max(0, round(home_score, 1))
-    away_score = max(0, round(away_score, 1))
+    # Clamp negatives, round using standard rounding
+    home_score = max(0, round(home_score))
+    away_score = max(0, round(away_score))
 
     return {
         "winner": "Home" if pred_winner == 1 else "Away",
@@ -692,7 +678,6 @@ six_days_later = today + timedelta(days=6)
 schedule_df = nfl.import_schedules([today.year])
 schedule_df['gameday'] = pd.to_datetime(schedule_df['gameday']).dt.date
 
-# Only keep games not yet played
 upcoming_games = schedule_df[
     (schedule_df['gameday'] >= today) &
     (schedule_df['gameday'] <= six_days_later) &
