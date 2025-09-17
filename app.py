@@ -380,7 +380,7 @@ def feature_engineering(df):
     home_team_enc = encoder.transform(df['home_team'].values.reshape(-1, 1))
     away_team_enc = encoder.transform(df['away_team'].values.reshape(-1, 1))
 
-    df['home_advantage'] = 1
+    df['home_advantage'] = 3
     df['div_game'] = df['div_game'].astype(int)
     game_type_enc = pd.get_dummies(df['game_type'], prefix='type')
     roof_enc = pd.get_dummies(df['roof'], prefix='roof')
@@ -494,7 +494,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
                 input_dict[col] = 1
 
     # Numeric and engineered features
-    input_dict['home_advantage'] = 1
+    input_dict['home_advantage'] = 3
     input_dict['div_game'] = 0
     input_dict['temp'] = last_row.get('temp', 60)
     input_dict['wind'] = last_row.get('wind', 5)
@@ -554,7 +554,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     base_clf_models = [
         RandomForestClassifier(n_estimators=120, random_state=42),
         XGBClassifier(n_estimators=100, random_state=42, use_label_encoder=False, eval_metric="logloss"),
-        LogisticRegression(max_iter=1000, random_state=42)
+        LogisticRegression(max_iter=10000, random_state=42)
     ]
     base_margin_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
@@ -595,7 +595,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         return model_list
 
     X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=1000, random_state=42)
+    meta_clf = LogisticRegression(max_iter=10000, random_state=42)
     meta_clf.fit(X_cls_stack, y_winner)
     fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
 
@@ -634,7 +634,15 @@ def stacking_predict(models, meta, X, problem_type="reg", noise_std=0):
 def predict_game(X_pred_full):
     # Winner classification
     X_cls_pred = X_pred_full[selected_features_cls]
-    win_proba = stacking_predict(base_clf_models, meta_clf, X_cls_pred, problem_type="cls")[0]
+    # Get stacking features for meta-classifier
+    stack_feats = []
+    for model in base_clf_models:
+        if hasattr(model, "predict_proba"):
+            stack_feats.append(model.predict_proba(X_cls_pred)[:, 1])
+        else:
+            stack_feats.append(model.predict(X_cls_pred))
+    stack_feats = np.column_stack(stack_feats)
+    win_proba = meta_clf.predict_proba(stack_feats)[0, 1]
     pred_winner = int(win_proba > 0.5)
 
     # Margin regression
