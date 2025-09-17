@@ -352,8 +352,8 @@ import pandas as pd
 import numpy as np
 import nfl_data_py as nfl
 from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import Ridge, ElasticNet, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.model_selection import KFold
@@ -380,7 +380,7 @@ def feature_engineering(df):
     home_team_enc = encoder.transform(df['home_team'].values.reshape(-1, 1))
     away_team_enc = encoder.transform(df['away_team'].values.reshape(-1, 1))
 
-    df['home_advantage'] = 3
+    df['home_advantage'] = 1
     df['div_game'] = df['div_game'].astype(int)
     game_type_enc = pd.get_dummies(df['game_type'], prefix='type')
     roof_enc = pd.get_dummies(df['roof'], prefix='roof')
@@ -494,7 +494,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
                 input_dict[col] = 1
 
     # Numeric and engineered features
-    input_dict['home_advantage'] = 3
+    input_dict['home_advantage'] = 1
     input_dict['div_game'] = 0
     input_dict['temp'] = last_row.get('temp', 60)
     input_dict['wind'] = last_row.get('wind', 5)
@@ -523,7 +523,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
 
 st.title("NFL Game Winner & Score Predictor (Stacked Ensemble + More Seasons)")
 
-seasons = list(range(2010, datetime.today().year + 1))
+seasons = list(range(2015, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
     df = fetch_nfl_data(seasons)
@@ -551,24 +551,19 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     X_total_selected = X[selected_features_total]
     X_cls_selected = X[selected_features_cls]
 
+    # --- Use only the strongest models for stacking ---
     base_clf_models = [
         RandomForestClassifier(n_estimators=120, random_state=42),
-        XGBClassifier(n_estimators=100, random_state=42, use_label_encoder=False, eval_metric="logloss"),
-        LogisticRegression(max_iter=10000, random_state=42)
+        XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss"),
+        LogisticRegression(max_iter=5000, random_state=42)
     ]
     base_margin_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
-        XGBRegressor(n_estimators=120, random_state=42),
-        GradientBoostingRegressor(n_estimators=120, random_state=42),
-        Ridge(),
-        ElasticNet()
+        XGBRegressor(n_estimators=120, random_state=42)
     ]
     base_total_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
-        XGBRegressor(n_estimators=120, random_state=42),
-        GradientBoostingRegressor(n_estimators=120, random_state=42),
-        Ridge(),
-        ElasticNet()
+        XGBRegressor(n_estimators=120, random_state=42)
     ]
 
     def get_stacking_preds(X, y, model_list, problem_type="reg"):
@@ -595,11 +590,12 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         return model_list
 
     X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=10000, random_state=42)
+    meta_clf = LogisticRegression(max_iter=5000, random_state=42)
     meta_clf.fit(X_cls_stack, y_winner)
     fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
 
     X_margin_stack = get_stacking_preds(X_margin_selected, y_margin, base_margin_models, problem_type="reg")
+    from sklearn.linear_model import Ridge
     meta_margin = Ridge()
     meta_margin.fit(X_margin_stack, y_margin)
     fit_base_models(X_margin_selected, y_margin, base_margin_models, "reg")
@@ -634,7 +630,6 @@ def stacking_predict(models, meta, X, problem_type="reg", noise_std=0):
 def predict_game(X_pred_full):
     # Winner classification
     X_cls_pred = X_pred_full[selected_features_cls]
-    # Get stacking features for meta-classifier
     stack_feats = []
     for model in base_clf_models:
         if hasattr(model, "predict_proba"):
