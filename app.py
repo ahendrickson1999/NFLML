@@ -20,6 +20,62 @@ def fetch_nfl_data(seasons):
     df = df.dropna(subset=['home_score', 'away_score'])
     return df
 
+def get_team_streak(past_df, team):
+    games = past_df[(past_df['home_team'] == team) | (past_df['away_team'] == team)].sort_values('gameday')
+    streak = 0
+    for _, row in games.iterrows():
+        team_score = row['home_score'] if row['home_team'] == team else row['away_score']
+        opp_score = row['away_score'] if row['home_team'] == team else row['home_score']
+        if team_score > opp_score:
+            streak = streak + 1 if streak >= 0 else 1
+        else:
+            streak = streak - 1 if streak <= 0 else -1
+    return streak
+
+def get_rolling_stat(past_df, team, stat, N=3, home_or_away=None):
+    if home_or_away == 'home':
+        games = past_df[past_df['home_team'] == team].sort_values('gameday', ascending=False)
+        scores = games['home_score']
+    elif home_or_away == 'away':
+        games = past_df[past_df['away_team'] == team].sort_values('gameday', ascending=False)
+        scores = games['away_score']
+    else:
+        games = past_df[(past_df['home_team'] == team) | (past_df['away_team'] == team)].sort_values('gameday', ascending=False)
+        if stat == 'score':
+            scores = np.where(games['home_team'] == team, games['home_score'], games['away_score'])
+        elif stat == 'opp_score':
+            scores = np.where(games['home_team'] == team, games['away_score'], games['home_score'])
+        else:
+            scores = games[stat]  # fallback
+    scores = pd.Series(scores)
+    return scores.head(N).mean() if not scores.empty else 21
+
+def get_h2h_winrate(past_df, home_team, away_team, N=3):
+    games = past_df[
+        (((past_df['home_team'] == home_team) & (past_df['away_team'] == away_team)) |
+         ((past_df['home_team'] == away_team) & (past_df['away_team'] == home_team)))
+    ].sort_values('gameday', ascending=False).head(N)
+    results = []
+    for _, game in games.iterrows():
+        if game['home_team'] == home_team:
+            results.append(1 if game['home_score'] > game['away_score'] else 0)
+        else:
+            results.append(1 if game['away_score'] > game['home_score'] else 0)
+    return np.mean(results) if results else 0.5
+
+def get_h2h_margin(past_df, home_team, away_team, N=3):
+    games = past_df[
+        (((past_df['home_team'] == home_team) & (past_df['away_team'] == away_team)) |
+         ((past_df['home_team'] == away_team) & (past_df['away_team'] == home_team)))
+    ].sort_values('gameday', ascending=False).head(N)
+    margins = []
+    for _, game in games.iterrows():
+        if game['home_team'] == home_team:
+            margins.append(game['home_score'] - game['away_score'])
+        else:
+            margins.append(game['away_score'] - game['home_score'])
+    return np.mean(margins) if margins else 0
+
 @st.cache_data(show_spinner=False)
 def feature_engineering(df):
     all_teams = pd.concat([df['home_team'], df['away_team']]).unique()
@@ -47,103 +103,14 @@ def feature_engineering(df):
     df['away_rest'] = df['away_rest'].fillna(7)
     df['home_rest'] = df['home_rest'].fillna(7)
 
-    all_teams = list(all_teams)
-    # --- Advanced Feature Engineering ---
-
-    # 1. Win/Loss streaks, rolling averages, home/away splits
-    streaks = {}
-    rolling_3 = {}
-    rolling_5 = {}
-    home_rolling_3 = {}
-    away_rolling_3 = {}
-    for team in all_teams:
-        # Get games for this team
-        team_games = df[(df['home_team'] == team) | (df['away_team'] == team)].sort_values('gameday')
-        # Win/Loss
-        team_games['team_score'] = np.where(team_games['home_team'] == team, team_games['home_score'], team_games['away_score'])
-        team_games['opp_score'] = np.where(team_games['home_team'] == team, team_games['away_score'], team_games['home_score'])
-        team_games['win'] = (team_games['team_score'] > team_games['opp_score']).astype(int)
-        # Streak
-        streak = []
-        cur = 0
-        for result in team_games['win']:
-            if result:
-                cur = cur + 1 if cur >= 0 else 1
-            else:
-                cur = cur - 1 if cur <= 0 else -1
-            streak.append(cur)
-        streaks[team] = dict(zip(team_games['game_id'], streak))
-        # Rolling avg scored/allowed last 3 and 5
-        team_games['score_rolling_3'] = team_games['team_score'].rolling(3, min_periods=1).mean()
-        team_games['allow_rolling_3'] = team_games['opp_score'].rolling(3, min_periods=1).mean()
-        team_games['score_rolling_5'] = team_games['team_score'].rolling(5, min_periods=1).mean()
-        team_games['allow_rolling_5'] = team_games['opp_score'].rolling(5, min_periods=1).mean()
-        rolling_3[team] = dict(zip(team_games['game_id'], zip(team_games['score_rolling_3'], team_games['allow_rolling_3'])))
-        rolling_5[team] = dict(zip(team_games['game_id'], zip(team_games['score_rolling_5'], team_games['allow_rolling_5'])))
-        # Home/away splits: rolling average in last 3 home/away games
-        home_games = team_games[team_games['home_team'] == team]
-        away_games = team_games[team_games['away_team'] == team]
-        h_rolling = home_games['home_score'].rolling(3, min_periods=1).mean()
-        a_rolling = away_games['away_score'].rolling(3, min_periods=1).mean()
-        home_rolling_3[team] = dict(zip(home_games['game_id'], h_rolling))
-        away_rolling_3[team] = dict(zip(away_games['game_id'], a_rolling))
-
-    df['home_team_streak'] = df.apply(lambda row: streaks[row['home_team']].get(row['game_id'], 0), axis=1)
-    df['away_team_streak'] = df.apply(lambda row: streaks[row['away_team']].get(row['game_id'], 0), axis=1)
-    df['home_team_scored_last3'] = df.apply(lambda row: rolling_3[row['home_team']].get(row['game_id'], (row['home_score'], row['away_score']))[0], axis=1)
-    df['home_team_allowed_last3'] = df.apply(lambda row: rolling_3[row['home_team']].get(row['game_id'], (row['home_score'], row['away_score']))[1], axis=1)
-    df['away_team_scored_last3'] = df.apply(lambda row: rolling_3[row['away_team']].get(row['game_id'], (row['away_score'], row['home_score']))[0], axis=1)
-    df['away_team_allowed_last3'] = df.apply(lambda row: rolling_3[row['away_team']].get(row['game_id'], (row['away_score'], row['home_score']))[1], axis=1)
-    df['home_team_scored_last5'] = df.apply(lambda row: rolling_5[row['home_team']].get(row['game_id'], (row['home_score'], row['away_score']))[0], axis=1)
-    df['home_team_allowed_last5'] = df.apply(lambda row: rolling_5[row['home_team']].get(row['game_id'], (row['home_score'], row['away_score']))[1], axis=1)
-    df['away_team_scored_last5'] = df.apply(lambda row: rolling_5[row['away_team']].get(row['game_id'], (row['away_score'], row['home_score']))[0], axis=1)
-    df['away_team_allowed_last5'] = df.apply(lambda row: rolling_5[row['away_team']].get(row['game_id'], (row['away_score'], row['home_score']))[1], axis=1)
-    df['home_team_home_scored_last3'] = df.apply(lambda row: home_rolling_3[row['home_team']].get(row['game_id'], row['home_score']), axis=1)
-    df['away_team_away_scored_last3'] = df.apply(lambda row: away_rolling_3[row['away_team']].get(row['game_id'], row['away_score']), axis=1)
-
-    # 2. Head-to-head history: last 3 meetings
-    def last_n_meetings(row, n=3, col='winner'):
-        games = df[
-            ((df['home_team'] == row['home_team']) & (df['away_team'] == row['away_team'])) |
-            ((df['home_team'] == row['away_team']) & (df['away_team'] == row['home_team']))
-        ]
-        games = games[games['gameday'] < row['gameday']].sort_values('gameday', ascending=False).head(n)
-        if col == "winner":
-            # 1=home won, 0=away won, flip if swapped
-            results = []
-            for _, game in games.iterrows():
-                if game['home_team'] == row['home_team']:
-                    results.append(1 if game['home_score'] > game['away_score'] else 0)
-                else:
-                    results.append(1 if game['away_score'] > game['home_score'] else 0)
-            return np.mean(results) if results else 0.5
-        elif col == "margin":
-            margins = []
-            for _, game in games.iterrows():
-                if game['home_team'] == row['home_team']:
-                    margins.append(game['home_score'] - game['away_score'])
-                else:
-                    margins.append(game['away_score'] - game['home_score'])
-            return np.mean(margins) if margins else 0
-        return 0
-
-    df['h2h_last3_winrate'] = df.apply(lambda row: last_n_meetings(row, 3, col='winner'), axis=1)
-    df['h2h_last3_margin'] = df.apply(lambda row: last_n_meetings(row, 3, col='margin'), axis=1)
-
-    # 3. Rest differential
-    df['rest_diff'] = df['home_rest'] - df['away_rest']
-
-    # 4. Weather buckets
-    df['cold_game'] = (df['temp'] < 40).astype(int)
-    df['hot_game'] = (df['temp'] > 80).astype(int)
-    df['windy_game'] = (df['wind'] > 15).astype(int)
-
-    # 5. Game importance: week number, playoff flag, late season
+    # Advanced Feature Engineering
     df['week'] = pd.to_datetime(df['gameday'], errors='coerce').dt.isocalendar().week.fillna(0).astype(int)
     df['late_season'] = (df['week'] > 14).astype(int)
     df['is_playoff'] = (df['game_type'] == 'POST').astype(int)
-
-    # 6. Turnover differential (if present)
+    df['rest_diff'] = df['home_rest'] - df['away_rest']
+    df['cold_game'] = (df['temp'] < 40).astype(int)
+    df['hot_game'] = (df['temp'] > 80).astype(int)
+    df['windy_game'] = (df['wind'] > 15).astype(int)
     if 'home_turnovers' in df.columns and 'away_turnovers' in df.columns:
         df['home_turnover_diff'] = df['away_turnovers'] - df['home_turnovers']
         df['away_turnover_diff'] = df['home_turnovers'] - df['away_turnovers']
@@ -151,7 +118,57 @@ def feature_engineering(df):
         df['home_turnover_diff'] = 0
         df['away_turnover_diff'] = 0
 
-    # --- Existing rolling team stats ---
+    # Rolling stats, streaks, head-to-head (for each row)
+    home_streaks = []
+    away_streaks = []
+    home_scored3 = []
+    away_scored3 = []
+    home_allowed3 = []
+    away_allowed3 = []
+    home_scored5 = []
+    away_scored5 = []
+    home_allowed5 = []
+    away_allowed5 = []
+    home_home_scored3 = []
+    away_away_scored3 = []
+    h2h_winrates = []
+    h2h_margins = []
+
+    for idx, row in df.iterrows():
+        past_df = df[df['gameday'] < row['gameday']]
+        home_team = row['home_team']
+        away_team = row['away_team']
+        home_streaks.append(get_team_streak(past_df, home_team))
+        away_streaks.append(get_team_streak(past_df, away_team))
+        home_scored3.append(get_rolling_stat(past_df, home_team, 'score', 3))
+        away_scored3.append(get_rolling_stat(past_df, away_team, 'score', 3))
+        home_allowed3.append(get_rolling_stat(past_df, home_team, 'opp_score', 3))
+        away_allowed3.append(get_rolling_stat(past_df, away_team, 'opp_score', 3))
+        home_scored5.append(get_rolling_stat(past_df, home_team, 'score', 5))
+        away_scored5.append(get_rolling_stat(past_df, away_team, 'score', 5))
+        home_allowed5.append(get_rolling_stat(past_df, home_team, 'opp_score', 5))
+        away_allowed5.append(get_rolling_stat(past_df, away_team, 'opp_score', 5))
+        home_home_scored3.append(get_rolling_stat(past_df, home_team, 'score', 3, home_or_away='home'))
+        away_away_scored3.append(get_rolling_stat(past_df, away_team, 'score', 3, home_or_away='away'))
+        h2h_winrates.append(get_h2h_winrate(past_df, home_team, away_team, 3))
+        h2h_margins.append(get_h2h_margin(past_df, home_team, away_team, 3))
+
+    df['home_team_streak'] = home_streaks
+    df['away_team_streak'] = away_streaks
+    df['home_team_scored_last3'] = home_scored3
+    df['away_team_scored_last3'] = away_scored3
+    df['home_team_allowed_last3'] = home_allowed3
+    df['away_team_allowed_last3'] = away_allowed3
+    df['home_team_scored_last5'] = home_scored5
+    df['away_team_scored_last5'] = away_scored5
+    df['home_team_allowed_last5'] = home_allowed5
+    df['away_team_allowed_last5'] = away_allowed5
+    df['home_team_home_scored_last3'] = home_home_scored3
+    df['away_team_away_scored_last3'] = away_away_scored3
+    df['h2h_last3_winrate'] = h2h_winrates
+    df['h2h_last3_margin'] = h2h_margins
+
+    # Original rolling stats
     team_stats, team_def_stats, team_win_stats = {}, {}, {}
     for team in all_teams:
         team_games = df[(df['home_team'] == team) | (df['away_team'] == team)].sort_values('gameday')
@@ -175,7 +192,6 @@ def feature_engineering(df):
     df['home_team_win_rate'] = df.apply(lambda row: team_win_stats[row['home_team']].get(row['game_id'], 0.5), axis=1)
     df['away_team_win_rate'] = df.apply(lambda row: team_win_stats[row['away_team']].get(row['game_id'], 0.5), axis=1)
 
-    # --- Combine all features ---
     X = pd.concat([
         pd.DataFrame(home_team_enc, index=df.index, columns=[f'home_{t}' for t in encoder.categories_[0]]),
         pd.DataFrame(away_team_enc, index=df.index, columns=[f'away_{t}' for t in encoder.categories_[0]]),
@@ -207,7 +223,7 @@ def feature_engineering(df):
     ], axis=1)
     y_home = df['home_score']
     y_away = df['away_score']
-    return X, y_home, y_away, encoder, all_teams
+    return X, y_home, y_away, encoder, all_teams, df
 
 def select_features(X, y, top_n):
     rfr = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -217,9 +233,11 @@ def select_features(X, y, top_n):
     return selected_features
 
 def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_columns, team_avgs, team_def_avgs, team_win_avgs):
-    last_row = df.iloc[-1]
-    input_dict = {}
+    # Use last available date as 'now'
+    now = df['gameday'].max()
+    past_df = df[df['gameday'] < now]
 
+    input_dict = {}
     # Team encoding
     home_enc = encoder.transform([[home_team]])[0]
     away_enc = encoder.transform([[away_team]])[0]
@@ -228,75 +246,68 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
     for i, col in enumerate([f'away_{t}' for t in encoder.categories_[0]]):
         input_dict[col] = away_enc[i]
 
-    # Categorical dummies: use mode or default
+    # Categorical dummies: use most common or default
+    game_type = 'REG'
     for col in all_possible_columns:
         if col.startswith('type_'):
-            input_dict[col] = 0
-            if f'type_{last_row.get("game_type", "REG")}' == col:
-                input_dict[col] = 1
+            input_dict[col] = 1 if col == f'type_{game_type}' else 0
         elif col.startswith('roof_'):
-            input_dict[col] = 0
-            if f'roof_{last_row.get("roof", "outdoors")}' == col:
-                input_dict[col] = 1
+            input_dict[col] = 1 if col == 'roof_outdoors' else 0
         elif col.startswith('surface_'):
-            input_dict[col] = 0
-            if f'surface_{last_row.get("surface", "grass")}' == col:
-                input_dict[col] = 1
+            input_dict[col] = 1 if col == 'surface_grass' else 0
         elif col.startswith('hcoach_'):
             input_dict[col] = 0
-            if f'hcoach_{last_row.get("home_coach", "")}' == col:
-                input_dict[col] = 1
         elif col.startswith('acoach_'):
             input_dict[col] = 0
-            if f'acoach_{last_row.get("away_coach", "")}' == col:
-                input_dict[col] = 1
         elif col.startswith('hq_'):
             input_dict[col] = 0
-            if f'hq_{last_row.get("home_qb_name", "")}' == col:
-                input_dict[col] = 1
         elif col.startswith('aq_'):
             input_dict[col] = 0
-            if f'aq_{last_row.get("away_qb_name", "")}' == col:
-                input_dict[col] = 1
         elif col.startswith('loc_'):
             input_dict[col] = 0
-            if f'loc_{last_row.get("location", "")}' == col:
-                input_dict[col] = 1
 
-    # Numeric and engineered features
+    # Numeric and engineered features using actual past stats
     input_dict['home_advantage'] = 1
     input_dict['div_game'] = 0
-    input_dict['temp'] = last_row.get('temp', 60)
-    input_dict['wind'] = last_row.get('wind', 5)
-    input_dict['spread_line'] = last_row.get('spread_line', 0)
-    input_dict['total_line'] = last_row.get('total_line', 45)
-    input_dict['away_moneyline'] = last_row.get('away_moneyline', 0)
-    input_dict['home_moneyline'] = last_row.get('home_moneyline', 0)
-    input_dict['away_rest'] = last_row.get('away_rest', 7)
-    input_dict['home_rest'] = last_row.get('home_rest', 7)
+    input_dict['temp'] = 60
+    input_dict['wind'] = 5
+    input_dict['spread_line'] = 0
+    input_dict['total_line'] = 45
+    input_dict['away_moneyline'] = 0
+    input_dict['home_moneyline'] = 0
+    input_dict['away_rest'] = 7
+    input_dict['home_rest'] = 7
 
-    # Use team averages from training data for new matchups
-    input_dict['home_team_avg'] = team_avgs.get(home_team, last_row.get('home_team_avg', 21))
-    input_dict['away_team_avg'] = team_avgs.get(away_team, last_row.get('away_team_avg', 21))
-    input_dict['home_team_def_avg'] = team_def_avgs.get(home_team, last_row.get('home_team_def_avg', 21))
-    input_dict['away_team_def_avg'] = team_def_avgs.get(away_team, last_row.get('away_team_def_avg', 21))
-    input_dict['home_team_win_rate'] = team_win_avgs.get(home_team, last_row.get('home_team_win_rate', 0.5))
-    input_dict['away_team_win_rate'] = team_win_avgs.get(away_team, last_row.get('away_team_win_rate', 0.5))
+    input_dict['home_team_avg'] = team_avgs.get(home_team, 21)
+    input_dict['away_team_avg'] = team_avgs.get(away_team, 21)
+    input_dict['home_team_def_avg'] = team_def_avgs.get(home_team, 21)
+    input_dict['away_team_def_avg'] = team_def_avgs.get(away_team, 21)
+    input_dict['home_team_win_rate'] = team_win_avgs.get(home_team, 0.5)
+    input_dict['away_team_win_rate'] = team_win_avgs.get(away_team, 0.5)
 
-    # New engineered features - fill with safe defaults or averages
-    for col in [
-        'home_team_streak', 'away_team_streak',
-        'home_team_scored_last3', 'away_team_scored_last3',
-        'home_team_allowed_last3', 'away_team_allowed_last3',
-        'home_team_scored_last5', 'away_team_scored_last5',
-        'home_team_allowed_last5', 'away_team_allowed_last5',
-        'home_team_home_scored_last3', 'away_team_away_scored_last3',
-        'h2h_last3_winrate', 'h2h_last3_margin',
-        'rest_diff', 'cold_game', 'hot_game', 'windy_game',
-        'week', 'late_season', 'is_playoff',
-        'home_turnover_diff', 'away_turnover_diff'
-    ]:
-        input_dict[col] = last_row.get(col, 0)
+    input_dict['home_team_streak'] = get_team_streak(past_df, home_team)
+    input_dict['away_team_streak'] = get_team_streak(past_df, away_team)
+    input_dict['home_team_scored_last3'] = get_rolling_stat(past_df, home_team, 'score', 3)
+    input_dict['away_team_scored_last3'] = get_rolling_stat(past_df, away_team, 'score', 3)
+    input_dict['home_team_allowed_last3'] = get_rolling_stat(past_df, home_team, 'opp_score', 3)
+    input_dict['away_team_allowed_last3'] = get_rolling_stat(past_df, away_team, 'opp_score', 3)
+    input_dict['home_team_scored_last5'] = get_rolling_stat(past_df, home_team, 'score', 5)
+    input_dict['away_team_scored_last5'] = get_rolling_stat(past_df, away_team, 'score', 5)
+    input_dict['home_team_allowed_last5'] = get_rolling_stat(past_df, home_team, 'opp_score', 5)
+    input_dict['away_team_allowed_last5'] = get_rolling_stat(past_df, away_team, 'opp_score', 5)
+    input_dict['home_team_home_scored_last3'] = get_rolling_stat(past_df, home_team, 'score', 3, 'home')
+    input_dict['away_team_away_scored_last3'] = get_rolling_stat(past_df, away_team, 'score', 3, 'away')
+    input_dict['h2h_last3_winrate'] = get_h2h_winrate(past_df, home_team, away_team, 3)
+    input_dict['h2h_last3_margin'] = get_h2h_margin(past_df, home_team, away_team, 3)
+    input_dict['rest_diff'] = 0
+    input_dict['cold_game'] = 0
+    input_dict['hot_game'] = 0
+    input_dict['windy_game'] = 0
+    input_dict['week'] = 8
+    input_dict['late_season'] = 0
+    input_dict['is_playoff'] = 0
+    input_dict['home_turnover_diff'] = 0
+    input_dict['away_turnover_diff'] = 0
 
     X_pred = pd.DataFrame([input_dict])
     for col in all_possible_columns:
@@ -313,7 +324,7 @@ seasons = list(range(2018, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
     df = fetch_nfl_data(seasons)
-    X, y_home, y_away, encoder, all_teams = feature_engineering(df)
+    X, y_home, y_away, encoder, all_teams, df = feature_engineering(df)
     all_possible_columns = X.columns.tolist()
     team_avgs, team_def_avgs, team_win_avgs = {}, {}, {}
     for team in all_teams:
@@ -338,19 +349,17 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     X_cls_selected = X[selected_features_cls]
 
     base_clf_models = [
-        RandomForestClassifier(n_estimators=60, random_state=42),
+        RandomForestClassifier(n_estimators=120, random_state=42),
         XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss"),
         LogisticRegression(max_iter=5000, random_state=42)
     ]
     base_margin_models = [
-        RandomForestRegressor(n_estimators=60, random_state=42),
-        XGBRegressor(n_estimators=60, random_state=42)
+        RandomForestRegressor(n_estimators=120, random_state=42),
+        XGBRegressor(n_estimators=120, random_state=42)
     ]
     base_total_models = [
-        RandomForestRegressor(n_estimators=60, random_state=42),
-        XGBRegressor(n_estimators=60
-                     
-                     , random_state=42)
+        RandomForestRegressor(n_estimators=120, random_state=42),
+        XGBRegressor(n_estimators=120, random_state=42)
     ]
 
     def get_stacking_preds(X, y, model_list, problem_type="reg"):
@@ -416,7 +425,6 @@ def stacking_predict(models, meta, X, problem_type="reg", noise_std=0):
 def predict_game(X_pred_full):
     # Winner classification
     X_cls_pred = X_pred_full[selected_features_cls]
-    # Get stacking features for meta-classifier
     stack_feats = []
     for model in base_clf_models:
         if hasattr(model, "predict_proba"):
@@ -439,17 +447,14 @@ def predict_game(X_pred_full):
         base_total_models, meta_total, X_total_pred, problem_type="reg", noise_std=resid_std_total
     )[0]
 
-    # If classifier says home wins, margin is positive; else, flip sign
     if pred_winner == 0:
         pred_margin = -abs(pred_margin)
     else:
         pred_margin = abs(pred_margin)
 
-    # Calculate scores
     home_score = (pred_total + pred_margin) / 2
     away_score = (pred_total - pred_margin) / 2
 
-    # Clamp negatives, round using standard rounding
     home_score = max(0, round(home_score))
     away_score = max(0, round(away_score))
 
@@ -461,7 +466,6 @@ def predict_game(X_pred_full):
         "away_win_proba": 1 - win_proba
     }
 
-# ------------ UPCOMING GAMES (NEXT 6 DAYS) -------------
 today = datetime.today().date()
 six_days_later = today + timedelta(days=6)
 
