@@ -320,7 +320,7 @@ def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_c
 
 st.title("NFL Game Winner & Score Predictor (Stacked Ensemble + More Seasons + Advanced Features)")
 
-seasons = list(range(2018, datetime.today().year + 1))
+seasons = list(range(2010, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
     df = fetch_nfl_data(seasons)
