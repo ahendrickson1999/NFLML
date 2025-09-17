@@ -562,7 +562,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     base_clf_models = [
         RandomForestClassifier(n_estimators=120, random_state=42),
         XGBClassifier(n_estimators=100, random_state=42, use_label_encoder=False, eval_metric="logloss"),
-        LogisticRegression(max_iter=1000, random_state=42)
+        LogisticRegression(max_iter=10000, random_state=42)
     ]
     base_margin_models = [
         RandomForestRegressor(n_estimators=120, random_state=42),
@@ -606,7 +606,7 @@ with st.spinner("Loading and training... (first run may take a minute)"):
 
     # Classification stacking
     X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=1000, random_state=42)
+    meta_clf = LogisticRegression(max_iter=10000, random_state=42)
     meta_clf.fit(X_cls_stack, y_winner)
     fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
 
