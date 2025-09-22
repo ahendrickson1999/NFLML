@@ -19,6 +19,12 @@ def load_data(seasons):
     return sched, pbp
 
 # ---- PRE-AGGREGATE PER-TEAM, PER-GAME STATS ----
+def get_first_or_nan(series):
+    try:
+        return series.iloc[0]
+    except Exception:
+        return np.nan
+
 def preaggregate_team_game_stats(sched, pbp):
     features = []
     for _, game in sched.iterrows():
@@ -63,10 +69,10 @@ def preaggregate_team_game_stats(sched, pbp):
 
             # Red Zone Efficiency Differential
             off_rz_trips = off[(off['yardline_100'] <= 20) & (off['down'] == 1)]
-            off_rz_tds = off_rz_trips['touchdown'].sum()
+            off_rz_tds = off_rz_trips['touchdown'].sum() if not off_rz_trips.empty else 0
             off_rz_pct = (off_rz_tds / len(off_rz_trips)) if len(off_rz_trips) > 0 else 0
             def_rz_trips = deff[(deff['yardline_100'] <= 20) & (deff['down'] == 1)]
-            def_rz_tds = def_rz_trips['touchdown'].sum()
+            def_rz_tds = def_rz_trips['touchdown'].sum() if not def_rz_trips.empty else 0
             def_rz_pct = (def_rz_tds / len(def_rz_trips)) if len(def_rz_trips) > 0 else 0
             rz_diff = off_rz_pct - def_rz_pct
 
@@ -77,13 +83,15 @@ def preaggregate_team_game_stats(sched, pbp):
             def_3rd_conv = (def_3rd['first_down'] == 1).mean() if len(def_3rd) > 0 else 0
             third_down_diff = off_3rd_conv - def_3rd_conv
 
-            # Starting Field Position Differential
+            # Starting Field Position Differential (FIXED)
             try:
-                off_fp = 100 - off.groupby('game_id').first()['yardline_100']
+                off_fp_series = 100 - off.groupby('game_id').first()['yardline_100']
+                off_fp = get_first_or_nan(off_fp_series)
             except Exception:
                 off_fp = np.nan
             try:
-                def_fp = 100 - deff.groupby('game_id').first()['yardline_100']
+                def_fp_series = 100 - deff.groupby('game_id').first()['yardline_100']
+                def_fp = get_first_or_nan(def_fp_series)
             except Exception:
                 def_fp = np.nan
             field_pos_diff = (off_fp - def_fp) if pd.notnull(off_fp) and pd.notnull(def_fp) else 0
