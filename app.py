@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 # ---- CONFIG ----
-DEFAULT_SEASONS = [2020,2021,2022,2023,2024,2025]  # Start with one season. Add more as RAM allows.
+DEFAULT_SEASONS = [2020]  # Start with one season. Add more as RAM allows.
 ROLLING_WINDOW = 3
 
 # ---- LOAD DATA ----
