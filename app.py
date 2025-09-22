@@ -302,10 +302,10 @@ if home_team and away_team and home_team != away_team:
     X_pred = build_features_for_matchup(home_team, away_team, season, week)
     result = predict_game(X_pred)
     st.success(
-        f"Prediction: {away_team} @ {home_team}: {result['predicted_away_score']} - {result['predicted_home_score']}  \n"
+        f"Prediction: {away_team} @ {home_team}: {away_team}: {result['predicted_away_score']} - {home_team}: {result['predicted_home_score']}  \n"
         f"Winner: {result['winner']} team  \n"
-        f"Home Win Probability: {100*result['home_win_proba']:.1f}%  \n"
-        f"Away Win Probability: {100*result['away_win_proba']:.1f}%"
+        f"{home_team} Win Probability: {100*result['home_win_proba']:.1f}%  \n"
+        f"{away_team} Win Probability: {100*result['away_win_proba']:.1f}%"
     )
 elif home_team == away_team:
     st.warning("Select different teams!")
