@@ -168,7 +168,7 @@ def build_rolling_feature_df(sched, pbp, rolling_window=3):
 
 st.title("NFL Game Winner & Score Predictor (3-Game Rolling Averages)")
 
-seasons = list(range(2010, datetime.today().year + 1))
+seasons = list(range(2015, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
     sched, pbp = fetch_nfl_data(seasons)
