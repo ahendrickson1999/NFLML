@@ -5,325 +5,255 @@ import nfl_data_py as nfl
 from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.preprocessing import OneHotEncoder
 from xgboost import XGBRegressor, XGBClassifier
 from sklearn.model_selection import KFold
-from packaging import version
 import sklearn
+from packaging import version
 
-TOP_N_FEATURES = 40
-STACK_FOLDS = 3  # Reduced for speed
-
+# ---- ADVANCED FEATURE ENGINEERING ----
 @st.cache_data(show_spinner=False)
 def fetch_nfl_data(seasons):
-    df = nfl.import_schedules(seasons)
-    df = df.dropna(subset=['home_score', 'away_score'])
-    return df
+    # Load schedules and play-by-play
+    sched = nfl.import_schedules(seasons)
+    pbp = nfl.import_pbp_data(seasons)
+    sched = sched.dropna(subset=['home_score', 'away_score'])
+    # Filter pbp for relevant games only
+    pbp = pbp[pbp['season'].isin(seasons)]
+    return sched, pbp
+
+def summarize_team_season(pbp, season):
+    # Aggregate per-team, per-season stats
+    teams = pd.concat([pbp['posteam'], pbp['defteam']]).dropna().unique()
+    summary = []
+    for team in teams:
+        team_pbp_off = pbp[pbp['posteam'] == team]
+        team_pbp_def = pbp[pbp['defteam'] == team]
+
+        # Turnover Differential (per game)
+        takeaways = ((team_pbp_def['interception'] == 1) | (team_pbp_def['fumble_lost'] == 1)).sum()
+        giveaways = ((team_pbp_off['interception'] == 1) | (team_pbp_off['fumble_lost'] == 1)).sum()
+        games_played = len(team_pbp_off['game_id'].unique())
+        turnover_diff = (takeaways - giveaways) / games_played if games_played else 0
+
+        # QB Efficiency (EPA/play, Passer Rating Differential not included)
+        qb_eff = team_pbp_off['epa'].mean()
+
+        # Yards per Play Differential
+        off_ypp = team_pbp_off['yards_gained'].mean()
+        def_ypp = team_pbp_def['yards_gained'].mean()
+        ypp_diff = (off_ypp - def_ypp) if off_ypp and def_ypp else 0
+
+        # Success Rate Differential (EPA > 0)
+        off_succ = (team_pbp_off['epa'] > 0).mean()
+        def_succ = (team_pbp_def['epa'] > 0).mean()
+        success_rate_diff = off_succ - def_succ
+
+        # Explosive Plays Differential (20+ yard gains)
+        off_exp = (team_pbp_off['yards_gained'] >= 20).sum() / games_played if games_played else 0
+        def_exp = (team_pbp_def['yards_gained'] >= 20).sum() / games_played if games_played else 0
+        explosive_diff = off_exp - def_exp
+
+        # Pressure/Sack Rate Differential
+        off_dropbacks = team_pbp_off['pass_attempt'].sum()
+        def_dropbacks = team_pbp_def['pass_attempt'].sum()
+        off_sacks = team_pbp_off['sack'].sum()
+        def_sacks = team_pbp_def['sack'].sum()
+        off_sack_rate = (off_sacks / off_dropbacks) if off_dropbacks else 0
+        def_sack_rate = (def_sacks / def_dropbacks) if def_dropbacks else 0
+        sack_rate_diff = def_sack_rate - off_sack_rate
+
+        # Red Zone Efficiency Differential (TDs / trips inside 20)
+        off_rz_trips = team_pbp_off[(team_pbp_off['yardline_100'] <= 20) & (team_pbp_off['down'] == 1)]
+        off_rz_tds = off_rz_trips['touchdown'].sum()
+        off_rz_pct = (off_rz_tds / len(off_rz_trips)) if len(off_rz_trips) > 0 else 0
+        def_rz_trips = team_pbp_def[(team_pbp_def['yardline_100'] <= 20) & (team_pbp_def['down'] == 1)]
+        def_rz_tds = def_rz_trips['touchdown'].sum()
+        def_rz_pct = (def_rz_tds / len(def_rz_trips)) if len(def_rz_trips) > 0 else 0
+        rz_diff = off_rz_pct - def_rz_pct
+
+        # Third Down Conversion % Differential
+        off_3rd = team_pbp_off[team_pbp_off['down'] == 3]
+        off_3rd_conv = (off_3rd['first_down'] == 1).mean() if len(off_3rd) > 0 else 0
+        def_3rd = team_pbp_def[team_pbp_def['down'] == 3]
+        def_3rd_conv = (def_3rd['first_down'] == 1).mean() if len(def_3rd) > 0 else 0
+        third_down_diff = off_3rd_conv - def_3rd_conv
+
+        # Starting Field Position Differential
+        if 'yardline_100' in team_pbp_off.columns:
+            off_fp = 100 - team_pbp_off.groupby('game_id').first()['yardline_100'].mean()
+        else:
+            off_fp = np.nan
+        if 'yardline_100' in team_pbp_def.columns:
+            def_fp = 100 - team_pbp_def.groupby('game_id').first()['yardline_100'].mean()
+        else:
+            def_fp = np.nan
+        field_pos_diff = (off_fp - def_fp) if pd.notnull(off_fp) and pd.notnull(def_fp) else 0
+
+        # Special Teams Efficiency (FG% + Net Punt, rough proxy)
+        off_fg = team_pbp_off[(team_pbp_off['play_type'] == 'field_goal')]
+        fg_made = (off_fg['field_goal_result'] == 'made').sum()
+        fg_att = len(off_fg)
+        fg_pct = (fg_made / fg_att) if fg_att else 0
+        punts = team_pbp_off[team_pbp_off['play_type'] == 'punt']
+        net_punt = (punts['punt_net_yards']).mean() if len(punts) > 0 and 'punt_net_yards' in punts.columns else 0
+        special_teams = fg_pct + (net_punt / 100 if net_punt else 0)
+
+        # Rushing Efficiency Differential
+        off_rush = team_pbp_off[team_pbp_off['play_type'] == 'run']
+        def_rush = team_pbp_def[team_pbp_def['play_type'] == 'run']
+        off_rush_ypp = off_rush['yards_gained'].mean() if len(off_rush) > 0 else 0
+        def_rush_ypp = def_rush['yards_gained'].mean() if len(def_rush) > 0 else 0
+        rush_yards_diff = off_rush_ypp - def_rush_ypp
+
+        # Time of Possession Differential (average per game, minutes)
+        if 'game_seconds_remaining' in team_pbp_off.columns:
+            off_top = team_pbp_off.groupby('game_id')['drive_time_sec'].sum().mean() / 60
+        else:
+            off_top = np.nan
+        if 'game_seconds_remaining' in team_pbp_def.columns:
+            def_top = team_pbp_def.groupby('game_id')['drive_time_sec'].sum().mean() / 60
+        else:
+            def_top = np.nan
+        top_diff = (off_top - def_top) if pd.notnull(off_top) and pd.notnull(def_top) else 0
+
+        # Penalty Yards Differential (per game)
+        off_pen = team_pbp_off[team_pbp_off['penalty'] == 1]['penalty_yards'].sum() / games_played if games_played else 0
+        def_pen = team_pbp_def[team_pbp_def['penalty'] == 1]['penalty_yards'].sum() / games_played if games_played else 0
+        penalty_diff = off_pen - def_pen
+
+        summary.append({
+            'season': season,
+            'team': team,
+            'turnover_diff': turnover_diff,
+            'qb_efficiency': qb_eff,
+            'ypp_diff': ypp_diff,
+            'success_rate_diff': success_rate_diff,
+            'explosive_diff': explosive_diff,
+            'sack_rate_diff': sack_rate_diff,
+            'rz_diff': rz_diff,
+            'third_down_diff': third_down_diff,
+            'field_pos_diff': field_pos_diff,
+            'special_teams': special_teams,
+            'rush_yards_diff': rush_yards_diff,
+            'top_diff': top_diff,
+            'penalty_diff': penalty_diff
+        })
+    return pd.DataFrame(summary)
 
 @st.cache_data(show_spinner=False)
-def feature_engineering(df):
-    all_teams = pd.concat([df['home_team'], df['away_team']]).unique()
-    if version.parse(sklearn.__version__) >= version.parse("1.2"):
-        encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
-    else:
-        encoder = OneHotEncoder(sparse=False, handle_unknown='ignore')
-    encoder.fit(all_teams.reshape(-1, 1))
-    home_team_enc = encoder.transform(df['home_team'].values.reshape(-1, 1))
-    away_team_enc = encoder.transform(df['away_team'].values.reshape(-1, 1))
-
-    df['home_advantage'] = 3
-    df['div_game'] = df['div_game'].astype(int)
-    game_type_enc = pd.get_dummies(df['game_type'], prefix='type')
-    roof_enc = pd.get_dummies(df['roof'], prefix='roof')
-    surface_enc = pd.get_dummies(df['surface'], prefix='surface')
-    home_coach_enc = pd.get_dummies(df['home_coach'], prefix='hcoach')
-    away_coach_enc = pd.get_dummies(df['away_coach'], prefix='acoach')
-    home_qb_enc = pd.get_dummies(df['home_qb_name'], prefix='hq')
-    away_qb_enc = pd.get_dummies(df['away_qb_name'], prefix='aq')
-    location_enc = pd.get_dummies(df['location'], prefix='loc')
-
-    for col in ['temp', 'wind', 'spread_line', 'total_line', 'away_moneyline', 'home_moneyline']:
-        df[col] = df[col].fillna(df[col].mean() if df[col].dtype != 'O' else 0)
-    df['away_rest'] = df['away_rest'].fillna(7)
-    df['home_rest'] = df['home_rest'].fillna(7)
-
-    team_stats, team_def_stats, team_win_stats = {}, {}, {}
-    for team in all_teams:
-        team_games = df[(df['home_team'] == team) | (df['away_team'] == team)].sort_values('gameday')
-        team_games['team_score'] = np.where(team_games['home_team'] == team, team_games['home_score'], team_games['away_score'])
-        team_games['team_score_avg'] = team_games['team_score'].rolling(window=3, min_periods=1).mean()
-        team_games['opp_score'] = np.where(team_games['home_team'] == team, team_games['away_score'], team_games['home_score'])
-        team_games['opp_score_avg'] = team_games['opp_score'].rolling(window=3, min_periods=1).mean()
-        team_games['win'] = np.where(
-            ((team_games['home_team'] == team) & (team_games['home_score'] > team_games['away_score'])) | 
-            ((team_games['away_team'] == team) & (team_games['away_score'] > team_games['home_score'])), 1, 0
+def build_feature_df(sched, pbp, seasons):
+    # For each season, get advanced features for all teams
+    team_stats = []
+    for season in seasons:
+        team_stats.append(summarize_team_season(pbp[pbp['season'] == season], season))
+    team_stats_df = pd.concat(team_stats)
+    # Map advanced features to each game in sched
+    merged = sched.copy()
+    for col in [
+        'turnover_diff', 'qb_efficiency', 'ypp_diff', 'success_rate_diff', 'explosive_diff', 'sack_rate_diff',
+        'rz_diff', 'third_down_diff', 'field_pos_diff', 'special_teams', 'rush_yards_diff', 'top_diff', 'penalty_diff'
+    ]:
+        merged = merged.merge(
+            team_stats_df[['season', 'team', col]].rename(columns={col: 'home_' + col}),
+            left_on=['season', 'home_team'],
+            right_on=['season', 'team'],
+            how='left'
         )
-        team_games['win_rate'] = team_games['win'].rolling(window=3, min_periods=1).mean()
-        team_stats[team] = team_games.set_index('game_id')['team_score_avg']
-        team_def_stats[team] = team_games.set_index('game_id')['opp_score_avg']
-        team_win_stats[team] = team_games.set_index('game_id')['win_rate']
+        merged = merged.merge(
+            team_stats_df[['season', 'team', col]].rename(columns={col: 'away_' + col}),
+            left_on=['season', 'away_team'],
+            right_on=['season', 'team'],
+            how='left'
+        )
+    # Compute differentials (home - away) for each feature
+    feature_cols = []
+    for col in [
+        'turnover_diff', 'qb_efficiency', 'ypp_diff', 'success_rate_diff', 'explosive_diff', 'sack_rate_diff',
+        'rz_diff', 'third_down_diff', 'field_pos_diff', 'special_teams', 'rush_yards_diff', 'top_diff', 'penalty_diff'
+    ]:
+        merged[f'{col}_diff'] = merged[f'home_{col}'] - merged[f'away_{col}']
+        feature_cols.append(f'{col}_diff')
+    X = merged[feature_cols].fillna(0)
+    y_home = merged['home_score']
+    y_away = merged['away_score']
+    return X, y_home, y_away, merged, feature_cols
 
-    df['home_team_avg'] = df.apply(lambda row: team_stats[row['home_team']].get(row['game_id'], row['home_score']), axis=1)
-    df['away_team_avg'] = df.apply(lambda row: team_stats[row['away_team']].get(row['game_id'], row['away_score']), axis=1)
-    df['home_team_def_avg'] = df.apply(lambda row: team_def_stats[row['home_team']].get(row['game_id'], row['away_score']), axis=1)
-    df['away_team_def_avg'] = df.apply(lambda row: team_def_stats[row['away_team']].get(row['game_id'], row['home_score']), axis=1)
-    df['home_team_win_rate'] = df.apply(lambda row: team_win_stats[row['home_team']].get(row['game_id'], 0.5), axis=1)
-    df['away_team_win_rate'] = df.apply(lambda row: team_win_stats[row['away_team']].get(row['game_id'], 0.5), axis=1)
+# ---- STREAMLIT APP ----
 
-    X = pd.concat([
-        pd.DataFrame(home_team_enc, index=df.index, columns=[f'home_{t}' for t in encoder.categories_[0]]),
-        pd.DataFrame(away_team_enc, index=df.index, columns=[f'away_{t}' for t in encoder.categories_[0]]),
-        game_type_enc,
-        roof_enc,
-        surface_enc,
-        home_coach_enc,
-        away_coach_enc,
-        home_qb_enc,
-        away_qb_enc,
-        location_enc,
-        df[['home_advantage', 'div_game', 'temp', 'wind', 'spread_line', 'total_line',
-            'away_moneyline', 'home_moneyline', 'away_rest', 'home_rest',
-            'home_team_avg', 'away_team_avg', 'home_team_def_avg', 'away_team_def_avg',
-            'home_team_win_rate', 'away_team_win_rate']]
-    ], axis=1)
-    y_home = df['home_score']
-    y_away = df['away_score']
-    return X, y_home, y_away, encoder, all_teams, df
+st.title("NFL Game Winner & Score Predictor (Advanced Features)")
 
-def select_features(X, y, top_n):
-    rfr = RandomForestRegressor(n_estimators=100, random_state=42)
-    rfr.fit(X, y)
-    importances = pd.Series(rfr.feature_importances_, index=X.columns)
-    selected_features = importances.nlargest(top_n).index.tolist()
-    return selected_features
-
-def build_features_for_matchup(home_team, away_team, encoder, df, all_possible_columns, team_avgs, team_def_avgs, team_win_avgs):
-    last_row = df.iloc[-1]
-    input_dict = {}
-
-    # Team encoding
-    home_enc = encoder.transform([[home_team]])[0]
-    away_enc = encoder.transform([[away_team]])[0]
-    for i, col in enumerate([f'home_{t}' for t in encoder.categories_[0]]):
-        input_dict[col] = home_enc[i]
-    for i, col in enumerate([f'away_{t}' for t in encoder.categories_[0]]):
-        input_dict[col] = away_enc[i]
-
-    # Categorical dummies: use mode or default
-    for col in all_possible_columns:
-        if col.startswith('type_'):
-            input_dict[col] = 0
-            if f'type_{last_row.get("game_type", "REG")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('roof_'):
-            input_dict[col] = 0
-            if f'roof_{last_row.get("roof", "outdoors")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('surface_'):
-            input_dict[col] = 0
-            if f'surface_{last_row.get("surface", "grass")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('hcoach_'):
-            input_dict[col] = 0
-            if f'hcoach_{last_row.get("home_coach", "")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('acoach_'):
-            input_dict[col] = 0
-            if f'acoach_{last_row.get("away_coach", "")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('hq_'):
-            input_dict[col] = 0
-            if f'hq_{last_row.get("home_qb_name", "")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('aq_'):
-            input_dict[col] = 0
-            if f'aq_{last_row.get("away_qb_name", "")}' == col:
-                input_dict[col] = 1
-        elif col.startswith('loc_'):
-            input_dict[col] = 0
-            if f'loc_{last_row.get("location", "")}' == col:
-                input_dict[col] = 1
-
-    # Numeric and engineered features
-    input_dict['home_advantage'] = 3
-    input_dict['div_game'] = 0
-    input_dict['temp'] = last_row.get('temp', 60)
-    input_dict['wind'] = last_row.get('wind', 5)
-    input_dict['spread_line'] = last_row.get('spread_line', 0)
-    input_dict['total_line'] = last_row.get('total_line', 45)
-    input_dict['away_moneyline'] = last_row.get('away_moneyline', 0)
-    input_dict['home_moneyline'] = last_row.get('home_moneyline', 0)
-    input_dict['away_rest'] = last_row.get('away_rest', 7)
-    input_dict['home_rest'] = last_row.get('home_rest', 7)
-
-    input_dict['home_team_avg'] = team_avgs.get(home_team, last_row.get('home_team_avg', 21))
-    input_dict['away_team_avg'] = team_avgs.get(away_team, last_row.get('away_team_avg', 21))
-    input_dict['home_team_def_avg'] = team_def_avgs.get(home_team, last_row.get('home_team_def_avg', 21))
-    input_dict['away_team_def_avg'] = team_def_avgs.get(away_team, last_row.get('away_team_def_avg', 21))
-    input_dict['home_team_win_rate'] = team_win_avgs.get(home_team, last_row.get('home_team_win_rate', 0.5))
-    input_dict['away_team_win_rate'] = team_win_avgs.get(away_team, last_row.get('away_team_win_rate', 0.5))
-
-    X_pred = pd.DataFrame([input_dict])
-    for col in all_possible_columns:
-        if col not in X_pred.columns:
-            X_pred[col] = 0
-    X_pred = X_pred[all_possible_columns]
-    X_pred = X_pred.fillna(0)
-    X_pred = X_pred.replace([np.inf, -np.inf], 0)
-    return X_pred
-
-st.title("NFL Game Winner & Score Predictor (Stacked Ensemble + More Seasons)")
-
-seasons = list(range(2020, datetime.today().year + 1))
+seasons = list(range(2010, datetime.today().year + 1))
 
 with st.spinner("Loading and training... (first run may take a minute)"):
-    df = fetch_nfl_data(seasons)
-    X, y_home, y_away, encoder, all_teams, df = feature_engineering(df)
-    all_possible_columns = X.columns.tolist()
-    team_avgs, team_def_avgs, team_win_avgs = {}, {}, {}
-    for team in all_teams:
-        scores = pd.concat([df[df['home_team']==team]['home_score'], df[df['away_team']==team]['away_score']])
-        opp_scores = pd.concat([df[df['home_team']==team]['away_score'], df[df['away_team']==team]['home_score']])
-        wins = pd.concat([df[(df['home_team']==team) & (df['home_score']>df['away_score'])]['game_id'],
-                          df[(df['away_team']==team) & (df['away_score']>df['home_score'])]['game_id']])
-        team_avgs[team] = scores.mean()
-        team_def_avgs[team] = opp_scores.mean()
-        team_win_avgs[team] = len(wins) / len(scores) if len(scores) > 0 else 0.5
+    sched, pbp = fetch_nfl_data(seasons)
+    X, y_home, y_away, merged, feature_cols = build_feature_df(sched, pbp, seasons)
 
-    y_winner = (df['home_score'] > df['away_score']).astype(int)
-    y_margin = df['home_score'] - df['away_score']
-    y_total = df['home_score'] + df['away_score']
+    # Model setup: winner classification, margin, total
+    y_winner = (y_home > y_away).astype(int)
+    y_margin = y_home - y_away
+    y_total = y_home + y_away
 
-    selected_features_margin = select_features(X, y_margin, TOP_N_FEATURES)
-    selected_features_total = select_features(X, y_total, TOP_N_FEATURES)
-    selected_features_cls = select_features(X, y_winner, TOP_N_FEATURES)
+    # Fit models (simple random forest/ensemble)
+    clf = RandomForestClassifier(n_estimators=120, random_state=42)
+    clf.fit(X, y_winner)
+    margin_reg = RandomForestRegressor(n_estimators=120, random_state=42)
+    margin_reg.fit(X, y_margin)
+    total_reg = RandomForestRegressor(n_estimators=120, random_state=42)
+    total_reg.fit(X, y_total)
 
-    X_margin_selected = X[selected_features_margin]
-    X_total_selected = X[selected_features_total]
-    X_cls_selected = X[selected_features_cls]
+    # For prediction: compute features for a given matchup
+    def get_team_season_stats(team, season):
+        row = merged[(merged['season'] == season) & (merged['home_team'] == team)]
+        if len(row) == 0:
+            row = merged[(merged['season'] == season) & (merged['away_team'] == team)]
+        if len(row) == 0:
+            # Fallback to latest available
+            row = merged[(merged['home_team'] == team) | (merged['away_team'] == team)].iloc[-1:]
+        return row.iloc[0] if len(row) > 0 else None
 
-    base_clf_models = [
-        RandomForestClassifier(n_estimators=120, random_state=42),
-        XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss"),
-        LogisticRegression(max_iter=4500, random_state=42)
-    ]
-    base_margin_models = [
-        RandomForestRegressor(n_estimators=120, random_state=42),
-        XGBRegressor(n_estimators=120, random_state=42)
-    ]
-    base_total_models = [
-        RandomForestRegressor(n_estimators=120, random_state=42),
-        XGBRegressor(n_estimators=120, random_state=42)
-    ]
+    def build_features_for_matchup(home_team, away_team, season):
+        home_stats = get_team_season_stats(home_team, season)
+        away_stats = get_team_season_stats(away_team, season)
+        feats = {}
+        for col in [
+            'turnover_diff', 'qb_efficiency', 'ypp_diff', 'success_rate_diff', 'explosive_diff', 'sack_rate_diff',
+            'rz_diff', 'third_down_diff', 'field_pos_diff', 'special_teams', 'rush_yards_diff', 'top_diff', 'penalty_diff'
+        ]:
+            h_val = home_stats[f'home_{col}'] if home_stats is not None and f'home_{col}' in home_stats else 0
+            a_val = away_stats[f'home_{col}'] if away_stats is not None and f'home_{col}' in away_stats else 0
+            feats[f'{col}_diff'] = h_val - a_val
+        return pd.DataFrame([feats])
 
-    def get_stacking_preds(X, y, model_list, problem_type="reg"):
-        n_folds = STACK_FOLDS
-        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-        oof_preds = np.zeros((len(X), len(model_list)))
-        for i, model in enumerate(model_list):
-            for train_idx, valid_idx in kf.split(X):
-                X_train, X_valid = X.iloc[train_idx], X.iloc[valid_idx]
-                y_train = y.iloc[train_idx]
-                model.fit(X_train, y_train)
-                if problem_type == "cls":
-                    if hasattr(model, 'predict_proba'):
-                        oof_preds[valid_idx, i] = model.predict_proba(X_valid)[:, 1]
-                    else:
-                        oof_preds[valid_idx, i] = model.predict(X_valid)
-                else:
-                    oof_preds[valid_idx, i] = model.predict(X_valid)
-        return oof_preds
+    def predict_game(X_pred):
+        win_proba = clf.predict_proba(X_pred)[0, 1]
+        pred_winner = int(win_proba > 0.5)
 
-    def fit_base_models(X, y, model_list, problem_type="reg"):
-        for model in model_list:
-            model.fit(X, y)
-        return model_list
+        pred_margin = margin_reg.predict(X_pred)[0]
+        pred_total = total_reg.predict(X_pred)[0]
 
-    X_cls_stack = get_stacking_preds(X_cls_selected, y_winner, base_clf_models, problem_type="cls")
-    meta_clf = LogisticRegression(max_iter=4500, random_state=42)
-    meta_clf.fit(X_cls_stack, y_winner)
-    fit_base_models(X_cls_selected, y_winner, base_clf_models, "cls")
-
-    X_margin_stack = get_stacking_preds(X_margin_selected, y_margin, base_margin_models, problem_type="reg")
-    meta_margin = Ridge()
-    meta_margin.fit(X_margin_stack, y_margin)
-    fit_base_models(X_margin_selected, y_margin, base_margin_models, "reg")
-
-    X_total_stack = get_stacking_preds(X_total_selected, y_total, base_total_models, problem_type="reg")
-    meta_total = Ridge()
-    meta_total.fit(X_total_stack, y_total)
-    fit_base_models(X_total_selected, y_total, base_total_models, "reg")
-
-    def get_residual_std_stack(meta, X_stack, y):
-        pred = meta.predict(X_stack)
-        return (y - pred).std()
-    resid_std_margin = get_residual_std_stack(meta_margin, X_margin_stack, y_margin)
-    resid_std_total = get_residual_std_stack(meta_total, X_total_stack, y_total)
-
-def stacking_predict(models, meta, X, problem_type="reg", noise_std=0):
-    stack_feats = []
-    for model in models:
-        if problem_type == "cls":
-            if hasattr(model, "predict_proba"):
-                stack_feats.append(model.predict_proba(X)[:, 1])
-            else:
-                stack_feats.append(model.predict(X))
+        if pred_winner == 0:
+            pred_margin = -abs(pred_margin)
         else:
-            stack_feats.append(model.predict(X))
-    stack_feats = np.column_stack(stack_feats)
-    pred = meta.predict(stack_feats)
-    if noise_std > 0:
-        pred += np.random.normal(0, noise_std, size=pred.shape)
-    return pred
+            pred_margin = abs(pred_margin)
 
-def predict_game(X_pred_full):
-    # Winner classification
-    X_cls_pred = X_pred_full[selected_features_cls]
-    stack_feats = []
-    for model in base_clf_models:
-        if hasattr(model, "predict_proba"):
-            stack_feats.append(model.predict_proba(X_cls_pred)[:, 1])
-        else:
-            stack_feats.append(model.predict(X_cls_pred))
-    stack_feats = np.column_stack(stack_feats)
-    win_proba = meta_clf.predict_proba(stack_feats)[0, 1]
-    pred_winner = int(win_proba > 0.5)
+        home_score = (pred_total + pred_margin) / 2
+        away_score = (pred_total - pred_margin) / 2
 
-    # Margin regression
-    X_margin_pred = X_pred_full[selected_features_margin]
-    pred_margin = stacking_predict(
-        base_margin_models, meta_margin, X_margin_pred, problem_type="reg", noise_std=resid_std_margin
-    )[0]
+        home_score = max(0, round(home_score))
+        away_score = max(0, round(away_score))
 
-    # Total regression
-    X_total_pred = X_pred_full[selected_features_total]
-    pred_total = stacking_predict(
-        base_total_models, meta_total, X_total_pred, problem_type="reg", noise_std=resid_std_total
-    )[0]
+        return {
+            "winner": "Home" if pred_winner == 1 else "Away",
+            "predicted_home_score": home_score,
+            "predicted_away_score": away_score,
+            "home_win_proba": win_proba,
+            "away_win_proba": 1 - win_proba
+        }
 
-    if pred_winner == 0:
-        pred_margin = -abs(pred_margin)
-    else:
-        pred_margin = abs(pred_margin)
-
-    home_score = (pred_total + pred_margin) / 2
-    away_score = (pred_total - pred_margin) / 2
-
-    home_score = max(0, round(home_score))
-    away_score = max(0, round(away_score))
-
-    return {
-        "winner": "Home" if pred_winner == 1 else "Away",
-        "predicted_home_score": home_score,
-        "predicted_away_score": away_score,
-        "home_win_proba": win_proba,
-        "away_win_proba": 1 - win_proba
-    }
-
+# ---- UPCOMING GAMES ----
 today = datetime.today().date()
 six_days_later = today + timedelta(days=6)
-
-schedule_df = nfl.import_schedules([today.year])
+schedule_df = sched.copy()
 schedule_df['gameday'] = pd.to_datetime(schedule_df['gameday']).dt.date
 
 upcoming_games = schedule_df[
@@ -341,11 +271,9 @@ else:
     for i, row in upcoming_games.iterrows():
         home_team = row['home_team']
         away_team = row['away_team']
-        X_pred_full = build_features_for_matchup(
-            home_team, away_team, encoder, df,
-            all_possible_columns, team_avgs, team_def_avgs, team_win_avgs
-        )
-        result = predict_game(X_pred_full)
+        season = row['season']
+        X_pred = build_features_for_matchup(home_team, away_team, season)
+        result = predict_game(X_pred)
         pred_rows.append({
             "Date": row['gameday'],
             "Away Team": away_team,
@@ -363,16 +291,14 @@ else:
 
 st.markdown("---")
 st.subheader("Manual Matchup Prediction")
-team_list = sorted(list(all_teams))
-home_team = st.selectbox("Select Home Team", team_list)
-away_team = st.selectbox("Select Away Team", team_list, index=1 if team_list[1] != home_team else 2)
+all_teams = sorted(list(set(list(sched['home_team'].unique()) + list(sched['away_team'].unique()))))
+home_team = st.selectbox("Select Home Team", all_teams)
+away_team = st.selectbox("Select Away Team", all_teams, index=1 if all_teams[1] != home_team else 2)
+season = st.selectbox("Season", seasons, index=len(seasons)-1)
 
 if home_team and away_team and home_team != away_team:
-    X_pred_full = build_features_for_matchup(
-        home_team, away_team, encoder, df,
-        all_possible_columns, team_avgs, team_def_avgs, team_win_avgs
-    )
-    result = predict_game(X_pred_full)
+    X_pred = build_features_for_matchup(home_team, away_team, season)
+    result = predict_game(X_pred)
     st.success(
         f"Prediction: {away_team} @ {home_team}: {result['predicted_away_score']} - {result['predicted_home_score']}  \n"
         f"Winner: {result['winner']} team  \n"
@@ -382,4 +308,4 @@ if home_team and away_team and home_team != away_team:
 elif home_team == away_team:
     st.warning("Select different teams!")
 
-st.caption("Powered by nfl_data_py and scikit-learn. Stacked ensemble (meta-model) with historical data since 2010.")
+st.caption("Powered by nfl_data_py and scikit-learn. Features: turnover, efficiency, explosive, 3rd down, sack, RZ, field pos, special teams, rushing, time, penalty differentials.")
