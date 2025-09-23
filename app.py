@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 # ---- CONFIG ----
-DEFAULT_SEASONS = [2024,2025]  # Start with one season. Add more as RAM allows.
+DEFAULT_SEASONS = [2024,2025]
 ROLLING_WINDOW = 3
 
 # ---- LOAD DATA ----
@@ -14,7 +14,7 @@ ROLLING_WINDOW = 3
 def load_data(seasons):
     sched = nfl.import_schedules(seasons)
     pbp = nfl.import_pbp_data(seasons)
-    sched = sched.dropna(subset=['home_score', 'away_score'])
+    sched = sched.dropna(subset=['home_score', 'away_score'], how='all')  # allow future games with both null
     pbp = pbp[pbp['season'].isin(seasons)]
     return sched, pbp
 
@@ -188,7 +188,12 @@ def build_feature_df(sched, team_game_stats, feature_names):
 # ---- STREAMLIT APP ----
 st.title("NFL Game Predictor (Optimized, 3-Game Rolling Stats)")
 
-seasons = st.multiselect("Seasons to load", options=list(range(2010, datetime.today().year + 1)), default=DEFAULT_SEASONS)
+# Allow selecting future season for predictions (e.g., 2025)
+future_year = datetime.today().year + 1
+season_options = sorted(list(set(list(range(2010, datetime.today().year + 1)) + [future_year])))
+seasons = st.multiselect("Seasons to load", options=season_options[:-1], default=DEFAULT_SEASONS)
+selected_predict_season = st.selectbox("Prediction Season", season_options, index=len(season_options)-1)
+
 with st.spinner("Loading and training... (first run may take a minute)"):
     sched, pbp = load_data(seasons)
     feature_names = [
@@ -211,12 +216,17 @@ with st.spinner("Loading and training... (first run may take a minute)"):
     total_reg.fit(X, y_total)
 
     def get_recent_rolling_stats(team, season, week):
+        # Use all games up to the most recent available (if future)
         team_games = team_game_stats[
             (team_game_stats['team'] == team) &
-            ((team_game_stats['season'] < season) | ((team_game_stats['season'] == season) & (team_game_stats['week'] < week)))
-        ].sort_values(['season', 'week']).tail(1)
+            ((team_game_stats['season'] < season) |
+             ((team_game_stats['season'] == season) & (team_game_stats['week'] < week)))
+        ]
+        if team_games.empty:
+            # fallback: use latest available
+            team_games = team_game_stats[team_game_stats['team'] == team]
         if not team_games.empty:
-            row = team_games.iloc[-1]
+            row = team_games.sort_values(['season', 'week']).iloc[-1]
             return {f'{col}_roll': row.get(f'{col}_roll', 0) for col in feature_names}
         else:
             return {f'{col}_roll': 0 for col in feature_names}
@@ -251,6 +261,8 @@ with st.spinner("Loading and training... (first run may take a minute)"):
         }
 
 # ---- UPCOMING GAMES ----
+
+# Always use the real date for live filtering
 today = datetime.today().date()
 six_days_later = today + timedelta(days=6)
 schedule_df = sched.copy()
@@ -263,12 +275,11 @@ upcoming_games = schedule_df[
     (schedule_df['away_score'].isnull())
 ]
 
-st.write(schedule_df.head())
-st.write(schedule_df.columns)
-st.write(schedule_df['gameday'].max(), schedule_df['gameday'].min())
-
 if len(upcoming_games) == 0:
-    st.info("No NFL games in the next 6 days.")
+    if selected_predict_season not in sched['season'].unique():
+        st.warning(f"No schedule data found for {selected_predict_season}. If you're trying to predict future games, use the manual matchup prediction below!")
+    else:
+        st.info("No NFL games in the next 6 days.")
 else:
     st.subheader(f"Predictions for NFL games in the next 6 days ({today} to {six_days_later}):")
     pred_rows = []
@@ -299,17 +310,17 @@ st.subheader("Manual Matchup Prediction")
 all_teams = sorted(list(set(list(sched['home_team'].unique()) + list(sched['away_team'].unique()))))
 home_team = st.selectbox("Select Home Team", all_teams)
 away_team = st.selectbox("Select Away Team", all_teams, index=1 if all_teams[1] != home_team else 2)
-season = st.selectbox("Season", seasons, index=len(seasons)-1)
-week = st.number_input("Week (for rolling context)", min_value=1, max_value=22, value=18)
+predict_season = selected_predict_season
+predict_week = st.number_input("Week (for rolling context)", min_value=1, max_value=22, value=1)
 
 if home_team and away_team and home_team != away_team:
-    X_pred = build_features_for_matchup(home_team, away_team, season, week)
+    X_pred = build_features_for_matchup(home_team, away_team, predict_season, predict_week)
     result = predict_game(X_pred)
     st.success(
-        f"Prediction: {away_team} @ {home_team}: {away_team}: {result['predicted_away_score']} - {home_team}: {result['predicted_home_score']}  \n"
+        f"Prediction: {away_team} @ {home_team}: {result['predicted_away_score']} - {result['predicted_home_score']}  \n"
         f"Winner: {result['winner']} team  \n"
-        f"{home_team} Win Probability: {100*result['home_win_proba']:.1f}%  \n"
-        f"{away_team} Win Probability: {100*result['away_win_proba']:.1f}%"
+        f"Home Win Probability: {100*result['home_win_proba']:.1f}%  \n"
+        f"Away Win Probability: {100*result['away_win_proba']:.1f}%"
     )
 elif home_team == away_team:
     st.warning("Select different teams!")
