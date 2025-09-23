@@ -263,6 +263,10 @@ upcoming_games = schedule_df[
     (schedule_df['away_score'].isnull())
 ]
 
+st.write(schedule_df.head())
+st.write(schedule_df.columns)
+st.write(schedule_df['gameday'].max(), schedule_df['gameday'].min())
+
 if len(upcoming_games) == 0:
     st.info("No NFL games in the next 6 days.")
 else:
