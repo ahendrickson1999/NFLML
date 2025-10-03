@@ -73,9 +73,9 @@ def get_rest_days(games, date_col):
 def build_features(games, pbp):
     games = add_vegas_lines(games)
     date_col = get_date_col(games)
-    # Compute per-team-per-game stats
     agg_stats = compute_team_game_stats(pbp)
-    # Prepare long-form (per team per game) DataFrame
+
+    # Prepare long-form DataFrame
     home = games[['game_id','season','week',date_col,'home_team','away_team','home_score','away_score','spread_line','total_line']].rename(
         columns={date_col:'date','home_team':'team','away_team':'opp','home_score':'points_scored','away_score':'opp_points'}
     )
@@ -85,19 +85,39 @@ def build_features(games, pbp):
     )
     away['is_home'] = 0
     long_games = pd.concat([home, away], ignore_index=True)
+
+    # Ensure merge keys match
+    long_games['team'] = long_games['team'].astype(str)
+    agg_stats['posteam'] = agg_stats['posteam'].astype(str)
+    long_games['game_id'] = long_games['game_id'].astype(str)
+    agg_stats['game_id'] = agg_stats['game_id'].astype(str)
+
     # Merge in aggregated per-team stats
     long_games = long_games.merge(agg_stats, how='left', left_on=['game_id','team'], right_on=['game_id','posteam'])
-    # Rolling stats
+
+    # If there are duplicate columns, fix them
+    if 'points_scored_x' in long_games.columns and 'points_scored_y' in long_games.columns:
+        long_games['points_scored'] = long_games['points_scored_y'].fillna(long_games['points_scored_x'])
+    elif 'points_scored_y' in long_games.columns:
+        long_games['points_scored'] = long_games['points_scored_y']
+    # Drop suffix columns if present
+    long_games = long_games.drop([c for c in long_games.columns if c.endswith('_x') or c.endswith('_y')], axis=1, errors='ignore')
+
+    # Defensive fillna for all engineered columns
+    for col in ['points_scored', 'total_yards', 'turnovers']:
+        if col not in long_games.columns:
+            long_games[col] = 0
+        long_games[col] = long_games[col].fillna(0)
+
     long_games = long_games.sort_values(['team','season','week'])
     for stat in ['points_scored','total_yards','turnovers']:
         long_games[f'{stat}_rolling5'] = long_games.groupby('team')[stat].rolling(5, min_periods=1).mean().reset_index(0,drop=True)
-    # Rest days
+
     rest_df = get_rest_days(games, date_col)
     long_games = long_games.merge(rest_df, how='left', on=['game_id','team'])
-    # Prepare matchup features per game (merge home/away features)
+
     features = []
     for _, row in games.iterrows():
-        # Get last rolling stats for home & away teams before this game
         def get_last(team, week, season, is_home):
             prev = long_games[
                 (long_games['team'] == team) &
