@@ -154,7 +154,7 @@ def train_models(df):
 years = st.sidebar.multiselect(
     "Select NFL seasons to use for training:",
     list(range(2010, datetime.now().year+1)),
-    default=[2021, 2022, 2023]
+    default=[2023,2024]
 )
 games, pbp, teams = load_data(years)
 st.info(f"Loaded {len(games)} games, {len(pbp)} play-by-play rows.")
