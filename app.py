@@ -18,7 +18,6 @@ st.write(
 def load_data(years):
     # Load schedule (games), play-by-play, and team descriptions
     games = nfl.import_schedules(years)
-    st.write("Columns in games:", games.columns.tolist())
     pbp = nfl.import_pbp_data(years)
     teams = nfl.import_team_desc()
     return games, pbp, teams
@@ -32,6 +31,12 @@ def add_vegas_lines(games):
     games['spread_line'] = games['spread_line'].fillna(0.0)
     games['total_line'] = games['total_line'].fillna(44.0)
     return games
+
+def get_date_col(games):
+    for candidate in ['gametime', 'start_time', 'datetime', 'game_date', 'start_date', 'date']:
+        if candidate in games.columns:
+            return candidate
+    raise Exception(f"No valid date column found in games columns: {games.columns.tolist()}")
 
 def compute_team_game_stats(pbp):
     # Aggregate play-by-play data for core stats per team per game
@@ -48,14 +53,14 @@ def compute_team_game_stats(pbp):
     agg_stats['turnovers'] = agg_stats['turnovers'] + agg_stats['fumbles']
     return agg_stats
 
-def get_rest_days(games):
+def get_rest_days(games, date_col):
     # Compute rest days since previous team game
     rest = []
     for team in set(games['home_team']).union(set(games['away_team'])):
         tgames = games[(games['home_team'] == team) | (games['away_team'] == team)].sort_values(['season', 'week'])
         last_date = None
         for idx, row in tgames.iterrows():
-            gdate = pd.to_datetime(row['start_date'])
+            gdate = pd.to_datetime(row[date_col])
             if last_date is None:
                 rest.append((row['game_id'], team, 7))
             else:
@@ -67,15 +72,16 @@ def get_rest_days(games):
 
 def build_features(games, pbp):
     games = add_vegas_lines(games)
+    date_col = get_date_col(games)
     # Compute per-team-per-game stats
     agg_stats = compute_team_game_stats(pbp)
     # Prepare long-form (per team per game) DataFrame
-    home = games[['game_id','season','week','start_date','home_team','away_team','home_score','away_score','spread_line','total_line']].rename(
-        columns={'home_team':'team','away_team':'opp','home_score':'points_scored','away_score':'opp_points'}
+    home = games[['game_id','season','week',date_col,'home_team','away_team','home_score','away_score','spread_line','total_line']].rename(
+        columns={date_col:'date','home_team':'team','away_team':'opp','home_score':'points_scored','away_score':'opp_points'}
     )
     home['is_home'] = 1
-    away = games[['game_id','season','week','start_date','away_team','home_team','away_score','home_score','spread_line','total_line']].rename(
-        columns={'away_team':'team','home_team':'opp','away_score':'points_scored','home_score':'opp_points'}
+    away = games[['game_id','season','week',date_col,'away_team','home_team','away_score','home_score','spread_line','total_line']].rename(
+        columns={date_col:'date','away_team':'team','home_team':'opp','away_score':'points_scored','home_score':'opp_points'}
     )
     away['is_home'] = 0
     long_games = pd.concat([home, away], ignore_index=True)
@@ -86,7 +92,7 @@ def build_features(games, pbp):
     for stat in ['points_scored','total_yards','turnovers']:
         long_games[f'{stat}_rolling5'] = long_games.groupby('team')[stat].rolling(5, min_periods=1).mean().reset_index(0,drop=True)
     # Rest days
-    rest_df = get_rest_days(games)
+    rest_df = get_rest_days(games, date_col)
     long_games = long_games.merge(rest_df, how='left', on=['game_id','team'])
     # Prepare matchup features per game (merge home/away features)
     features = []
