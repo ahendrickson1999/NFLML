@@ -104,7 +104,7 @@ def train_models(df):
     return clf, reg, feature_cols, acc, mae
 
 # --- App Logic ---
-years = st.sidebar.multiselect("Select NFL seasons to use for training:", list(range(2010, datetime.now().year+1)), default=[2023,2024])
+years = st.sidebar.multiselect("Select NFL seasons to use for training:", list(range(2010, datetime.now().year+1)), default=[2024])
 games, pbp, teams = load_data(years)
 st.info("Loaded {} games, {} play-by-play rows.".format(len(games), len(pbp)))
 with st.spinner("Building features and training models..."):
