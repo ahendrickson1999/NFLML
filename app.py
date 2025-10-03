@@ -54,7 +54,7 @@ def get_rest_days(games):
         tgames = games[(games['home_team'] == team) | (games['away_team'] == team)].sort_values(['season', 'week'])
         last_date = None
         for idx, row in tgames.iterrows():
-            gdate = pd.to_datetime(row['game_date'])
+            gdate = pd.to_datetime(row['start_date'])
             if last_date is None:
                 rest.append((row['game_id'], team, 7))
             else:
@@ -69,11 +69,11 @@ def build_features(games, pbp):
     # Compute per-team-per-game stats
     agg_stats = compute_team_game_stats(pbp)
     # Prepare long-form (per team per game) DataFrame
-    home = games[['game_id','season','week','game_date','home_team','away_team','home_score','away_score','spread_line','total_line']].rename(
+    home = games[['game_id','season','week','start_date','home_team','away_team','home_score','away_score','spread_line','total_line']].rename(
         columns={'home_team':'team','away_team':'opp','home_score':'points_scored','away_score':'opp_points'}
     )
     home['is_home'] = 1
-    away = games[['game_id','season','week','game_date','away_team','home_team','away_score','home_score','spread_line','total_line']].rename(
+    away = games[['game_id','season','week','start_date','away_team','home_team','away_score','home_score','spread_line','total_line']].rename(
         columns={'away_team':'team','home_team':'opp','away_score':'points_scored','home_score':'opp_points'}
     )
     away['is_home'] = 0
@@ -154,7 +154,7 @@ def train_models(df):
 years = st.sidebar.multiselect(
     "Select NFL seasons to use for training:",
     list(range(2010, datetime.now().year+1)),
-    default=[2023,2024]
+    default=[2021, 2022, 2023]
 )
 games, pbp, teams = load_data(years)
 st.info(f"Loaded {len(games)} games, {len(pbp)} play-by-play rows.")
