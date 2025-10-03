@@ -38,8 +38,8 @@ def compute_team_game_stats(pbp):
     pbp = pbp[pbp['posteam'].notnull() & pbp['defteam'].notnull()]
     agg_stats = pbp.groupby(['game_id', 'posteam']).agg(
         points_scored=('touchdown', 'sum'),
-        pass_yards=('pass_yds', 'sum'),
-        rush_yards=('rush_yds', 'sum'),
+        pass_yards=('passing_yards', 'sum'),
+        rush_yards=('rushing_yards', 'sum'),
         turnovers=('interception', 'sum'),
         fumbles=('fumble_lost', 'sum')
     ).reset_index()
