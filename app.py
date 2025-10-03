@@ -18,6 +18,7 @@ st.write(
 def load_data(years):
     # Load schedule (games), play-by-play, and team descriptions
     games = nfl.import_schedules(years)
+    st.write("Columns in games:", games.columns.tolist())
     pbp = nfl.import_pbp_data(years)
     teams = nfl.import_team_desc()
     return games, pbp, teams
