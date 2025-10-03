@@ -22,19 +22,46 @@ def load_data(years):
 
 # --- Feature Engineering ---
 def build_features(games, pbp):
-    # Calculate recent team stats (last 5 games rolling average)
-    games_sorted = games.sort_values(['team', 'season', 'week'])
-    for stat in ['points', 'total_yards', 'turnovers']:
-        games_sorted[f'{stat}_rolling5'] = games_sorted.groupby('team')[stat].rolling(5, min_periods=1).mean().reset_index(0,drop=True)
-    # Create matchup dataframe
-    matchups = []
+    # Unpivot games so each row is a single team's game
+    home = games.rename(columns={
+        'home_team': 'team',
+        'away_team': 'opp',
+        'home_score': 'points',
+        'away_score': 'opp_points'
+    }).copy()
+    home['is_home'] = 1
+
+    away = games.rename(columns={
+        'away_team': 'team',
+        'home_team': 'opp',
+        'away_score': 'points',
+        'home_score': 'opp_points'
+    }).copy()
+    away['is_home'] = 0
+
+    all_games = pd.concat([home, away], ignore_index=True)
+    all_games = all_games.sort_values(['team', 'season', 'week'])
+
+    # Rolling stats
+    for stat in ['points']:
+        all_games[f'{stat}_rolling5'] = (
+            all_games.groupby('team')[stat]
+            .rolling(5, min_periods=1).mean().reset_index(0, drop=True)
+        )
+
+    # Prepare matchup features for each game (merge home/away rolling stats)
+    features = []
     for _, row in games.iterrows():
-        # Home/Away team rolling stats
-        home = games_sorted[(games_sorted['team']==row['home_team']) & (games_sorted['game_id']!=row['game_id']) & (games_sorted['game_date']<row['game_date'])]
-        away = games_sorted[(games_sorted['team']==row['away_team']) & (games_sorted['game_id']!=row['game_id']) & (games_sorted['game_date']<row['game_date'])]
-        home_last = home.iloc[-1] if not home.empty else {}
-        away_last = away.iloc[-1] if not away.empty else {}
-        matchups.append({
+        # Get last rolling stats for home & away teams before this game
+        def get_last(team, week, season):
+            prev = all_games[
+                (all_games['team'] == team) &
+                ((all_games['season'] < season) | ((all_games['season'] == season) & (all_games['week'] < week)))
+            ]
+            return prev.iloc[-1] if not prev.empty else {}
+        home_last = get_last(row['home_team'], row['week'], row['season'])
+        away_last = get_last(row['away_team'], row['week'], row['season'])
+        features.append({
             'game_id': row['game_id'],
             'season': row['season'],
             'week': row['week'],
@@ -42,23 +69,13 @@ def build_features(games, pbp):
             'away_team': row['away_team'],
             'home_points_avg': home_last.get('points_rolling5', 0),
             'away_points_avg': away_last.get('points_rolling5', 0),
-            'home_yards_avg': home_last.get('total_yards_rolling5', 0),
-            'away_yards_avg': away_last.get('total_yards_rolling5', 0),
-            'home_tov_avg': home_last.get('turnovers_rolling5', 0),
-            'away_tov_avg': away_last.get('turnovers_rolling5', 0),
-            'home_rest': (pd.to_datetime(row['game_date']) - pd.to_datetime(home_last.get('game_date','1970-01-01'))).days if home_last.get('game_date') else 7,
-            'away_rest': (pd.to_datetime(row['game_date']) - pd.to_datetime(away_last.get('game_date','1970-01-01'))).days if away_last.get('game_date') else 7,
-            'home_is_favorite': int(row.get('spread_line',0)<0 if 'spread_line' in row else 0),
-            'spread': abs(row.get('spread_line',0)) if 'spread_line' in row else 0,
-            'over_under': row.get('total_line', 0) if 'total_line' in row else 0,
             'home_score': row['home_score'],
             'away_score': row['away_score']
         })
-    df = pd.DataFrame(matchups)
-    df = df.dropna(subset=['home_score','away_score'])
+    df = pd.DataFrame(features)
+    df = df.dropna(subset=['home_score', 'away_score'])
     df['home_win'] = (df['home_score'] > df['away_score']).astype(int)
     df['total_points'] = df['home_score'] + df['away_score']
-    # Drop games with missing stats
     return df
 
 # --- Model Training ---
